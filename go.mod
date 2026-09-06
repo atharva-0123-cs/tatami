@@ -3,6 +3,7 @@ module github.com/atharva-0123-cs/tview-demo
 go 1.25.9
 
 require (
+	github.com/creack/pty v1.1.24 // indirect
 	github.com/gdamore/encoding v1.0.1 // indirect
 	github.com/gdamore/tcell/v2 v2.8.1 // indirect
 	github.com/lucasb-eyer/go-colorful v1.2.0 // indirect
