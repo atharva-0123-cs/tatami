@@ -10,6 +10,7 @@ import (
 
 	"github.com/gdamore/tcell/v2"
 
+	"github.com/atharva-0123-cs/tview-demo/config"
 	"github.com/atharva-0123-cs/tview-demo/layout"
 	"github.com/atharva-0123-cs/tview-demo/pane"
 )
@@ -52,7 +53,7 @@ func setErrorMessage(msg string) {
 //     simply ends prefix mode without an action, mirroring the historical
 //     termbox behavior where modified keys had Ch == 0.
 //  5. Otherwise the event is forwarded to the shell.
-func handleKey(ev *tcell.EventKey) bool {
+func handleKey(ev *tcell.EventKey, prefix tcell.Key) bool {
 	// Escape cancels prefix and resize mode.
 	if ev.Key() == tcell.KeyEsc {
 		if resizeMode || prefixActive {
@@ -63,8 +64,8 @@ func handleKey(ev *tcell.EventKey) bool {
 		return false // forward Esc to the shell
 	}
 
-	// Ctrl+A toggles prefix mode
-	if ev.Key() == tcell.KeyCtrlA {
+	// The configured prefix toggles prefix mode.
+	if ev.Key() == prefix {
 		if resizeMode {
 			resizeMode = false
 		}
@@ -217,6 +218,9 @@ func main() {
 	log.SetOutput(f)
 	log.Println("Starting roge TUI app...")
 
+	cfg := config.Load()
+	log.Printf("config: prefix=%s mouse=%v", cfg.PrefixLabel, cfg.Mouse)
+
 	screen, err = tcell.NewScreen()
 	if err != nil {
 		log.Fatalf("Error creating screen: %v", err)
@@ -227,6 +231,9 @@ func main() {
 	defer screen.Fini()
 
 	screen.EnablePaste()
+	if cfg.Mouse {
+		screen.EnableMouse(tcell.MouseDragEvents)
+	}
 
 	// Wake the PollEvent loop whenever a background goroutine (PTY output
 	// reader, process-exit waiter) has new data to show.
@@ -239,10 +246,12 @@ func main() {
 		log.Fatalf("Error creating initial pane: %v", err)
 	}
 
+	style := layout.StatusStyle{PrefixLabel: cfg.PrefixLabel, Fg: cfg.StatusFg, Bg: cfg.StatusBg}
+
 	render := func() {
 		screen.Clear()
 		w, h := screen.Size()
-		wm.Draw(screen, w, h, prefixActive, resizeMode, errorMsg)
+		wm.Draw(screen, w, h, prefixActive, resizeMode, errorMsg, style)
 		screen.Show()
 	}
 
@@ -265,7 +274,7 @@ func main() {
 				// verbatim so pasted text can never be mistaken for prefix
 				// commands (Ctrl+A, q, x, ...).
 				forwardKey(ev)
-			} else if !handleKey(ev) {
+			} else if !handleKey(ev, cfg.PrefixKey) {
 				forwardKey(ev)
 			}
 			render()

@@ -196,7 +196,7 @@ func (wm *WindowManager) findLeaf(p *pane.Pane) *LayoutNode {
 //
 // Draw must run on the main goroutine (it touches the tcell screen buffer and,
 // inside each Pane.Draw, resizes PTYs).
-func (wm *WindowManager) Draw(screen tcell.Screen, width, height int, prefixActive, resizeMode bool, errorMsg string) {
+func (wm *WindowManager) Draw(screen tcell.Screen, width, height int, prefixActive, resizeMode bool, errorMsg string, style StatusStyle) {
 	if width <= 0 || height <= 0 {
 		return
 	}
@@ -209,7 +209,7 @@ func (wm *WindowManager) Draw(screen tcell.Screen, width, height int, prefixActi
 	}
 
 	if wm.root == nil {
-		wm.renderStatus(screen, width, height, prefixActive, resizeMode, errorMsg)
+		wm.renderStatus(screen, width, height, prefixActive, resizeMode, errorMsg, style)
 		screen.HideCursor()
 		return
 	}
@@ -237,7 +237,7 @@ func (wm *WindowManager) Draw(screen tcell.Screen, width, height int, prefixActi
 		}
 	}
 
-	wm.renderStatus(screen, width, height, prefixActive, resizeMode, errorMsg)
+	wm.renderStatus(screen, width, height, prefixActive, resizeMode, errorMsg, style)
 
 	if cursorVisible {
 		screen.ShowCursor(cursorX, cursorY)
@@ -330,6 +330,25 @@ const (
 	statusErr = tcell.Color(196) | tcell.ColorValid // red
 )
 
+// StatusStyle carries the per-run status-bar appearance. Fg and Bg may be set
+// from the config file; when either is zero the dark-theme default is used.
+type StatusStyle struct {
+	PrefixLabel string // prefix name shown in the idle hint, e.g. "Ctrl+A"
+	Fg          tcell.Color
+	Bg          tcell.Color
+}
+
+// resolve applies the dark-theme defaults to any zero fields.
+func (s StatusStyle) resolve() StatusStyle {
+	if s.Fg == 0 {
+		s.Fg = statusFg
+	}
+	if s.Bg == 0 {
+		s.Bg = statusBg
+	}
+	return s
+}
+
 // renderStatus draws the status line at the bottom of the screen.
 //
 // The left half shows the mode banner (" ROGE | [PREFIX] ...", "[RESIZE] ..."
@@ -337,7 +356,8 @@ const (
 // the right half shows the pane count and focused index (plus "[ZOOM]" when
 // zoomed). The whole row is blanked first so stale glyphs never survive from a
 // previous size. Must run on the main goroutine.
-func (wm *WindowManager) renderStatus(screen tcell.Screen, maxX, maxY int, prefixActive, resizeMode bool, errorMsg string) {
+func (wm *WindowManager) renderStatus(screen tcell.Screen, maxX, maxY int, prefixActive, resizeMode bool, errorMsg string, style StatusStyle) {
+	style = style.resolve()
 	y := maxY - 1
 	left := " ROGE "
 	if errorMsg != "" {
@@ -347,7 +367,7 @@ func (wm *WindowManager) renderStatus(screen tcell.Screen, maxX, maxY int, prefi
 	} else if prefixActive {
 		left += "| [PREFIX] c:h-split C:v-split x:close z:zoom 1-9:jump q:quit "
 	} else {
-		left += "| Prefix: Ctrl+A then commands... "
+		left += fmt.Sprintf("| Prefix: %s then commands... ", style.PrefixLabel)
 	}
 
 	total := wm.PaneCount()
@@ -363,8 +383,8 @@ func (wm *WindowManager) renderStatus(screen tcell.Screen, maxX, maxY int, prefi
 	}
 	right += " "
 
-	fg := statusFg
-	bg := statusBg
+	fg := style.Fg
+	bg := style.Bg
 	if errorMsg != "" {
 		fg = statusErr
 	} else if prefixActive || resizeMode {
