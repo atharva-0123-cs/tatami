@@ -79,10 +79,12 @@ func (wm *WindowManager) Draw(screen tcell.Screen, width, height int, prefixActi
 // Leaves draw their pane (Pane.Draw) when their rectangle is non-empty and
 // report whether the focused pane's cursor landed there. Containers partition
 // their rectangle along their SplitDir proportionally to each child's size
-// weight: horizontal splits stack children top-to-bottom (each child gets a
-// band of height avail*size/total, the last child absorbing rounding
-// remainder), vertical splits lay children out left-to-right the same way for
-// widths. The focused pane's cursor coordinates bubble up to Draw.
+// weight using seamSpans: horizontal splits stack children top-to-bottom (each
+// child gets a band of height avail*size/total, the last child absorbing
+// rounding remainder), vertical splits lay children out left-to-right the same
+// way for widths, and every sibling after the first overlaps the previous one
+// by one cell so the shared edge renders as a single border row/column. The
+// focused pane's cursor coordinates bubble up to Draw.
 //
 // distribute returns (cursorX, cursorY, hasCursor); hasCursor is true only for
 // the focused pane's draw when its cursor is visible.
@@ -110,42 +112,69 @@ func (wm *WindowManager) distribute(n *LayoutNode, x0, y0, x1, y1 int, screen tc
 		return 0, 0, false
 	}
 
-	if n.Dir == SplitHorizontal {
-		avail := y1 - y0
-		cursor := y0
-		for i, child := range n.children {
-			ch := (avail * n.sizes[i]) / total
-			cy1 := cursor + ch
-			if i == len(n.children)-1 {
-				cy1 = y1
-			}
-			if cy1 > cursor {
-				cx, cy, hc := wm.distribute(child, x0, cursor, x1, cy1, screen)
-				if hc {
-					cursorX, cursorY, hasCursor = cx, cy, true
-				}
-			}
-			cursor = cy1
-		}
+	horizontal := n.Dir == SplitHorizontal
+	avail, pos0 := 0, y0
+	if horizontal {
+		avail = y1 - y0
 	} else {
-		avail := x1 - x0
-		cursor := x0
-		for i, child := range n.children {
-			cw := (avail * n.sizes[i]) / total
-			cx1 := cursor + cw
-			if i == len(n.children)-1 {
-				cx1 = x1
+		avail, pos0 = x1-x0, x0
+	}
+
+	for i, child := range n.children {
+		sp := seamSpans(avail, n.sizes)[i]
+		if sp[1] <= sp[0] {
+			continue
+		}
+		if horizontal {
+			cx, cy, hc := wm.distribute(child, x0, pos0+sp[0], x1, pos0+sp[1], screen)
+			if hc {
+				cursorX, cursorY, hasCursor = cx, cy, true
 			}
-			if cx1 > cursor {
-				cx, cy, hc := wm.distribute(child, cursor, y0, cx1, y1, screen)
-				if hc {
-					cursorX, cursorY, hasCursor = cx, cy, true
-				}
+		} else {
+			cx, cy, hc := wm.distribute(child, pos0+sp[0], y0, pos0+sp[1], y1, screen)
+			if hc {
+				cursorX, cursorY, hasCursor = cx, cy, true
 			}
-			cursor = cx1
 		}
 	}
 	return cursorX, cursorY, hasCursor
+}
+
+// seamSpans computes each child's [start, end) span along a split axis given
+// the available length and proportional sizes.
+//
+// Children are laid out proportionally (span = avail*size/total, the last child
+// absorbing the rounding remainder). Each child after the first overlaps the
+// previous child by one cell on the shared edge: the new child starts one cell
+// *before* where the previous child ended, so the two panes' touching borders
+// land on the same row/column and render as a single divider. Spans are clamped
+// to never start before the axis origin.
+func seamSpans(avail int, sizes []int) [][2]int {
+	total := 0
+	for _, s := range sizes {
+		total += s
+	}
+	spans := make([][2]int, len(sizes))
+	if total <= 0 {
+		return spans
+	}
+	cursor := 0
+	for i, s := range sizes {
+		end := cursor + (avail*s)/total
+		if i == len(sizes)-1 {
+			end = avail
+		}
+		start := cursor
+		if i > 0 {
+			start = cursor - 1
+			if start < 0 {
+				start = 0
+			}
+		}
+		spans[i] = [2]int{start, end}
+		cursor = end
+	}
+	return spans
 }
 
 // statusDark is a dark-theme color scheme for the status bar: near-black

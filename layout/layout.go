@@ -28,9 +28,13 @@ const StatusBarHeight = 1
 // LayoutNode is a node in the layout tree. A leaf holds a single Pane;
 // a container holds children arranged in one direction.
 //
-// Sibling rectangles within one container never overlap and partition the
-// container's rectangle proportionally to their sizes. Leaf nodes have a nil
-// children/sizes slice; container nodes have a nil Pane.
+// Sibling rectangles within one container partition the container's rectangle
+// proportionally to their sizes, and each sibling after the first overlaps the
+// previous one by a single cell along the shared edge (seamSpans). That
+// overlap makes adjacent panes draw identical border cells on their touching
+// sides, so every internal boundary renders as one thin divider instead of two
+// parallel borders. Leaf nodes have a nil children/sizes slice; container nodes
+// have a nil Pane.
 type LayoutNode struct {
 	Leaf   bool
 	Pane   *pane.Pane // non-nil only if Leaf

@@ -137,3 +137,44 @@ func TestMoveFocusDirectional(t *testing.T) {
 		t.Fatal("MoveFocus(-1) should move back to the previous sibling")
 	}
 }
+
+// TestSeamSpansSharedEdge verifies that every span after the first starts one
+// cell before the previous span ends, so adjacent panes share a single border
+// row/column instead of two parallel borders.
+func TestSeamSpansSharedEdge(t *testing.T) {
+	sp := seamSpans(20, []int{1, 1})
+	if sp[0] != [2]int{0, 10} || sp[1] != [2]int{9, 20} {
+		t.Fatalf("spans = %v, want {[0 10] [9 20]}", sp)
+	}
+	// Three children: each internal boundary overlaps by exactly one cell.
+	sp = seamSpans(30, []int{1, 1, 1})
+	want := [][2]int{{0, 10}, {9, 20}, {19, 30}}
+	for i := range want {
+		if sp[i] != want[i] {
+			t.Fatalf("spans[%d] = %v, want %v", i, sp[i], want[i])
+		}
+		// The shared cell must lie inside *both* panes' spans.
+		if i > 0 && sp[i][0] != sp[i-1][1]-1 {
+			t.Fatalf("spans %v and %v do not share an edge", sp[i-1], sp[i])
+		}
+	}
+}
+
+// TestSeamSpansEdgeCases covers the remainder and degenerate cases: the last
+// child absorbs rounding, zero-size children produce no span, and a lone child
+// spans the whole axis untouched.
+func TestSeamSpansEdgeCases(t *testing.T) {
+	if sp := seamSpans(21, []int{1, 1}); sp[1] != [2]int{9, 21} {
+		t.Fatalf("remainder spans = %v, want {[0 10] [9 21]}", sp)
+	}
+	if sp := seamSpans(0, []int{1, 4, 5}); sp[1] != [2]int{0, 0} {
+		t.Fatalf("zero-avail spans = %v, want zero spans", sp)
+	}
+	if sp := seamSpans(40, []int{2}); sp[0] != [2]int{0, 40} {
+		t.Fatalf("single span = %v, want {[0 40]}", sp)
+	}
+	// No sizes at all: empty result, no panic.
+	if sp := seamSpans(10, nil); len(sp) != 0 {
+		t.Fatalf("nil sizes = %v, want empty", sp)
+	}
+}
