@@ -1,109 +1,219 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"os"
 
-	"github.com/gdamore/tcell/v2"
-	"github.com/rivo/tview"
+	"github.com/nsf/termbox-go"
 
 	"github.com/atharva-0123-cs/tview-demo/layout"
 )
 
 var (
-	app          *tview.Application
 	wm           *layout.WindowManager
 	prefixActive bool
-	statusBar    *tview.TextView
+	resizeMode   bool
+	errorMsg     string
+	shouldQuit   bool
 )
 
-func updateStatusBar() {
-	if prefixActive {
-		statusBar.SetText(" [yellow][PREFIX ACTIVE][white]  Press: [green]c[white] (new pane) | [green]x[white] (close) | [green]←/→[white] or [green]h/l[white] (focus) | [green]q[white] (quit)")
-	} else {
-		statusBar.SetText(" [green]ROGE[white] | Prefix: [yellow]Ctrl+A[white] | [dim]Ctrl+A then c/x/h/l/q[white]")
-	}
+// setErrorMessage records a status-bar message; it is cleared at the next key press.
+func setErrorMessage(msg string) {
+	errorMsg = msg
 }
 
+// handleKey processes prefix and resize commands.
+// Returns true if the key event was consumed by the multiplexer.
+func handleKey(ev termbox.Event) bool {
+	// Escape cancels prefix and resize mode.
+	if ev.Key == termbox.KeyEsc {
+		if resizeMode || prefixActive {
+			resizeMode = false
+			prefixActive = false
+			return true
+		}
+		return false // forward Esc to the shell
+	}
+
+	// Ctrl+A toggles prefix mode
+	if ev.Key == termbox.KeyCtrlA {
+		if resizeMode {
+			resizeMode = false
+		}
+		prefixActive = !prefixActive
+		return true
+	}
+
+	// Resize mode: h/j/k/l adjust the focused pane's proportions.
+	if resizeMode {
+		resizeMode = false
+		ch := ev.Ch
+		switch ch {
+		case 'h':
+			wm.DecreaseSize(layout.SplitVertical)
+		case 'l':
+			wm.IncreaseSize(layout.SplitVertical)
+		case 'k':
+			wm.DecreaseSize(layout.SplitHorizontal)
+		case 'j':
+			wm.IncreaseSize(layout.SplitHorizontal)
+		}
+		return true
+	}
+
+	// Prefix mode commands.
+	if prefixActive {
+		prefixActive = false
+		ch := ev.Ch
+
+		// Numbered pane selection: 1-9 jumps to pane N.
+		if ch >= '1' && ch <= '9' {
+			idx := int(ch - '0')
+			panes := wm.CollectPanes()
+			if idx >= 1 && idx <= len(panes) {
+				wm.FocusPane(panes[idx-1])
+			} else {
+				setErrorMessage(fmt.Sprintf("Invalid pane: %d (total %d)", idx, len(panes)))
+			}
+			return true
+		}
+
+		switch ch {
+		case 'c', '-': // Horizontal split (top/bottom)
+			if err := wm.NewPane(); err != nil {
+				log.Printf("Error creating pane: %v", err)
+				setErrorMessage(fmt.Sprintf("Split failed: %v", err))
+			}
+			return true
+		case 'C', '|': // Vertical split (left/right)
+			if err := wm.NewPaneVertical(); err != nil {
+				log.Printf("Error creating vertical pane: %v", err)
+				setErrorMessage(fmt.Sprintf("Split failed: %v", err))
+			}
+			return true
+		case 'x': // Close current pane
+			if wm.CloseCurrentPane() {
+				shouldQuit = true
+			}
+			return true
+		case 'h':
+			wm.FocusLeft()
+			return true
+		case 'j':
+			wm.FocusDown()
+			return true
+		case 'k':
+			wm.FocusUp()
+			return true
+		case 'l':
+			wm.FocusRight()
+			return true
+		case 'z':
+			wm.Zoom()
+			return true
+		case 'o':
+			wm.RotateFocused(1)
+			return true
+		case '}':
+			wm.SwapNext()
+			return true
+		case '{':
+			wm.SwapPrev()
+			return true
+		case 'r':
+			resizeMode = true
+			return true
+		case 'q':
+			shouldQuit = true
+			return true
+		}
+
+		// Arrow keys during prefix mode - move focus.
+		switch ev.Key {
+		case termbox.KeyArrowLeft:
+			wm.FocusLeft()
+			return true
+		case termbox.KeyArrowRight:
+			wm.FocusRight()
+			return true
+		case termbox.KeyArrowUp:
+			wm.FocusUp()
+			return true
+		case termbox.KeyArrowDown:
+			wm.FocusDown()
+			return true
+		}
+
+		// Any other key ends prefix mode without action.
+		return true
+	}
+
+	// Default: pass the key through to the running shell.
+	return false
+}
+
+// main opens the debug log, initializes termbox and the window manager, creates
+// the first pane, then runs the PollEvent loop until the last pane is closed.
 func main() {
-	// Setup logging to a file for debugging
 	f, err := os.OpenFile("roge.log", os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
 	if err != nil {
-		log.Fatalf("error opening file: %v", err)
+		fmt.Fprintf(os.Stderr, "Error opening log file: %v\n", err)
+		os.Exit(1)
 	}
 	defer f.Close()
 	log.SetOutput(f)
 	log.Println("Starting roge TUI app...")
 
-	app = tview.NewApplication()
-	wm = layout.NewWindowManager(app)
+	if err := termbox.Init(); err != nil {
+		log.Fatalf("Error initializing termbox: %v", err)
+	}
+	defer termbox.Close()
 
-	// Status bar at the bottom
-	statusBar = tview.NewTextView().
-		SetDynamicColors(true).
-		SetTextAlign(tview.AlignLeft)
-	updateStatusBar()
+	termbox.SetOutputMode(termbox.Output256)
 
-	// Main root layout: WindowManager flex on top, status bar on bottom
-	rootFlex := tview.NewFlex().
-		SetDirection(tview.FlexRow).
-		AddItem(wm.GetRootLayout(), 0, 1, true).
-		AddItem(statusBar, 1, 1, false)
-
-	// Add initial pane
+	wm = layout.NewWindowManager()
 	if err := wm.NewPane(); err != nil {
-		log.Fatalf("Failed to create initial pane: %v", err)
+		log.Fatalf("Error creating initial pane: %v", err)
 	}
 
-	// Global input capture for prefix key and pane management
-	app.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
-		// Handle Prefix Key activation: Ctrl+A
-		if event.Key() == tcell.KeyCtrlA {
-			prefixActive = !prefixActive
-			updateStatusBar()
-			return nil
-		}
+	render := func() {
+		termbox.Clear(termbox.ColorDefault, termbox.ColorDefault)
+		w, h := termbox.Size()
+		wm.Draw(w, h, prefixActive, resizeMode, errorMsg)
+		termbox.Flush()
+	}
 
-		if prefixActive {
-			prefixActive = false
-			updateStatusBar()
+	render()
 
-			switch event.Rune() {
-			case 'c': // New pane
-				if err := wm.NewPane(); err != nil {
-					log.Printf("Error creating new pane: %v", err)
+	for !shouldQuit {
+		ev := termbox.PollEvent()
+		switch ev.Type {
+		case termbox.EventKey:
+			errorMsg = ""
+
+			if !handleKey(ev) {
+				focused := wm.FocusedPane()
+				if focused != nil {
+					focused.HandleEvent(ev)
 				}
-				return nil
-			case 'x': // Close pane
-				wm.CloseCurrentPane()
-				return nil
-			case 'h': // Focus left
-				wm.MoveFocusLeft()
-				return nil
-			case 'l': // Focus right
-				wm.MoveFocusRight()
-				return nil
-			case 'q': // Quit
-				app.Stop()
-				return nil
 			}
+			render()
 
-			// Arrow keys during prefix mode
-			switch event.Key() {
-			case tcell.KeyLeft:
-				wm.MoveFocusLeft()
-				return nil
-			case tcell.KeyRight:
-				wm.MoveFocusRight()
-				return nil
-			}
+		case termbox.EventResize:
+			render()
+
+		case termbox.EventInterrupt:
+			render()
+
+		case termbox.EventError:
+			log.Printf("Termbox error event: %v", ev.Err)
 		}
-
-		return event
-	})
-
-	if err := app.SetRoot(rootFlex, true).EnableMouse(true).Run(); err != nil {
-		log.Fatalf("Error running application: %v", err)
 	}
+
+	for _, p := range wm.CollectPanes() {
+		_ = p.Close()
+	}
+
 	log.Println("Exiting roge TUI app.")
 }

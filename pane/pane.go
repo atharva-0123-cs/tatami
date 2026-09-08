@@ -2,163 +2,499 @@ package pane
 
 import (
 	"fmt"
-	"io"
 	"log"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
-	"syscall"
+	"time"
 
 	"github.com/creack/pty"
-	"github.com/gdamore/tcell/v2"
-	"github.com/rivo/tview"
+	"github.com/nsf/termbox-go"
 )
 
-// Pane represents a single terminal pane with a PTY and a tview.TextView
+// Pane wraps a PTY running a shell and a terminal emulator, acting as a single
+// panel in the multiplexer.
 type Pane struct {
-	*tview.TextView
+	name    string
 	pty     *os.File
 	cmd     *exec.Cmd
-	app     *tview.Application
-	label   string
-	ptyMtx  sync.Mutex // Mutex for PTY writes
+	ptyMtx  sync.Mutex
+	done    chan struct{} // closed when the child process exits
+	mu      sync.Mutex
+	dead    bool
+	exitMsg string
+	width   int
+	height  int
+	x0, y0  int
+	x1, y1  int
+	term    *terminal // emulated screen
 }
 
-// NewPane creates and initializes a new Pane
-func NewPane(app *tview.Application, label string) (*Pane, error) {
+// NewPane creates a new pane and starts a shell in a PTY.
+func NewPane(label string) (*Pane, error) {
 	p := &Pane{
-		TextView: tview.NewTextView().SetDynamicColors(true).SetRegions(true).SetWordWrap(false).SetMaxLines(1000),
-		app:      app,
-		label:    label,
+		name: "pane-" + label,
+		done: make(chan struct{}),
 	}
 
-	p.SetBorder(true).SetTitle(" [" + label + "] ")
-
-	// Spawn a shell
-	cmd := exec.Command("bash") // You can make this configurable (e.g., zsh, fish)
-	master, err := pty.Start(cmd)
+	cwd, err := os.Getwd()
 	if err != nil {
-		return nil, fmt.Errorf("failed to start pty: %w", err)
+		cwd = "/"
+		log.Printf("Warning: could not get working directory, defaulting to /: %v", err)
+	}
+
+	candidates := []string{"bash", os.Getenv("SHELL"), "zsh", "sh"}
+	seen := map[string]bool{}
+	var shells []string
+	for _, s := range candidates {
+		if s == "" || seen[s] {
+			continue
+		}
+		seen[s] = true
+		if path, perr := exec.LookPath(s); perr == nil {
+			shells = append(shells, path)
+		} else {
+			log.Printf("Shell candidate %q not found, skipping: %v", s, perr)
+		}
+	}
+
+	var (
+		master   *os.File
+		startCmd *exec.Cmd
+		lastErr  error
+		started  bool
+	)
+	for _, sh := range shells {
+		cmd := exec.Command(sh)
+		cmd.Dir = cwd
+		cmd.Env = append(os.Environ(), "TERM=xterm-256color")
+		m, serr := pty.Start(cmd)
+		if serr == nil {
+			master = m
+			startCmd = cmd
+			started = true
+			break
+		}
+		lastErr = serr
+		log.Printf("Warning: failed to start shell %q: %v", sh, serr)
+	}
+
+	if !started {
+		return nil, fmt.Errorf(
+			"failed to start any shell (tried %s): %w. Ensure a login shell is available and that PTY creation is permitted in this environment",
+			strings.Join(shells, ", "), lastErr,
+		)
 	}
 
 	p.pty = master
-	p.cmd = cmd
-
-	// Start reading from PTY and writing to TextView
-	go p.readPtyOutput()
-
-	// Capture key inputs when focused and send to PTY
-	p.SetInputCapture(p.handleInput)
-
-	// Handle TextView resizing to update PTY size
-	p.SetDrawFunc(func(screen tcell.Screen, x, y, width, height int) (int, int, int, int) {
-		// Inner rect of a bordered box.
-		ix, iy := x+1, y+1
-		iw, ih := width-2, height-2
-		if iw > 0 && ih > 0 {
-			p.ptyMtx.Lock()
-			pty.Setsize(p.pty, &pty.Winsize{Rows: uint16(ih), Cols: uint16(iw)})
-			p.ptyMtx.Unlock()
-		}
-		return ix, iy, iw, ih
+	p.cmd = startCmd
+	p.term = newTerminal(80, 24, func(b []byte) {
+		_, _ = p.WriteInput(b)
 	})
+
+	go p.readPtyOutput()
+	go func() {
+		err := p.cmd.Wait()
+		if err != nil && err.Error() != "signal: terminated" {
+			p.setDead(fmt.Sprintf("exited (%v)", err))
+			log.Printf("Pane %s process exited with: %v", p.label(), err)
+		} else {
+			p.setDead("exited")
+			log.Printf("Pane %s process exited.", p.label())
+		}
+		close(p.done)
+	}()
 
 	return p, nil
 }
 
-// readPtyOutput reads from the PTY and writes to the TextView
-	func (p *Pane) readPtyOutput() {
-		buf := make([]byte, 1024)
-		ansiWriter := tview.ANSIWriter(p.TextView)
-		for {
-			n, err := p.pty.Read(buf)
-			if err != nil {
-				log.Printf("Error reading from PTY for pane %s: %v", p.label, err)
-				// Check if the command has exited
-				if p.cmd.ProcessState != nil && p.cmd.ProcessState.Exited() {
-					log.Printf("Pane %s process exited.", p.label)
-					p.app.QueueUpdateDraw(func() {
-						p.SetTitle(" [" + p.label + "] [red]DEAD[white] ")
-						// Inform the layout manager that this pane is dead (not implemented yet)
-					})
-				} else if err != io.EOF { // Only stop on EOF if process hasn't exited
-					p.app.QueueUpdateDraw(func() {
-						p.Write([]byte(fmt.Sprintf("\n[red]PTY Read Error: %v[white]\n", err)))
-					})
-				}
-				return
+// label returns the pane's display number (name without the "pane-" prefix).
+func (p *Pane) label() string { return strings.TrimPrefix(p.name, "pane-") }
+
+// setDead marks the pane as terminated and flags it on the border.
+func (p *Pane) setDead(msg string) {
+	p.mu.Lock()
+	p.dead = true
+	p.exitMsg = msg
+	p.mu.Unlock()
+	termbox.Interrupt()
+}
+
+// Draw renders the border and terminal cells onto termbox within [x0, y0, x1, y1).
+// Returns the absolute cursor coordinates and whether the cursor is visible.
+func (p *Pane) Draw(x0, y0, x1, y1 int, isFocused bool) (cx, cy int, hasCursor bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	p.x0, p.y0, p.x1, p.y1 = x0, y0, x1, y1
+
+	w := x1 - x0 - 2
+	if w < 1 {
+		w = 1
+	}
+	h := y1 - y0 - 2
+	if h < 1 {
+		h = 1
+	}
+
+	if w != p.width || h != p.height {
+		p.width = w
+		p.height = h
+		p.term.resize(w, h)
+		p.ptyMtx.Lock()
+		if p.pty != nil {
+			if err := pty.Setsize(p.pty, &pty.Winsize{Rows: uint16(h), Cols: uint16(w)}); err != nil {
+				log.Printf("Error setting PTY size for pane %s: %v", p.label(), err)
 			}
-			if n > 0 {
-				// Write output to the TextView via ANSIWriter, then queue a redraw
-				p.app.QueueUpdateDraw(func() {
-					ansiWriter.Write(buf[:n])
-				})
+		}
+		p.ptyMtx.Unlock()
+	}
+
+	borderAttr := termbox.ColorBlue
+	if isFocused {
+		borderAttr |= termbox.AttrBold
+	}
+
+	// Draw corners
+	termbox.SetCell(x0, y0, '┌', borderAttr, termbox.ColorDefault)
+	termbox.SetCell(x1-1, y0, '┐', borderAttr, termbox.ColorDefault)
+	termbox.SetCell(x0, y1-1, '└', borderAttr, termbox.ColorDefault)
+	termbox.SetCell(x1-1, y1-1, '┘', borderAttr, termbox.ColorDefault)
+
+	// Top and bottom borders
+	for x := x0 + 1; x < x1-1; x++ {
+		termbox.SetCell(x, y0, '─', borderAttr, termbox.ColorDefault)
+		termbox.SetCell(x, y1-1, '─', borderAttr, termbox.ColorDefault)
+	}
+
+	// Left and right borders
+	for y := y0 + 1; y < y1-1; y++ {
+		termbox.SetCell(x0, y, '│', borderAttr, termbox.ColorDefault)
+		termbox.SetCell(x1-1, y, '│', borderAttr, termbox.ColorDefault)
+	}
+
+	if p.dead {
+		title := " dead "
+		if p.exitMsg != "" {
+			title = fmt.Sprintf(" %s ", p.exitMsg)
+		}
+		titleRunes := []rune(title)
+		for i, r := range titleRunes {
+			if x0+2+i < x1-1 {
+				termbox.SetCell(x0+2+i, y0, r, termbox.ColorRed|termbox.AttrBold, termbox.ColorDefault)
 			}
 		}
 	}
 
-// WriteInput writes data to the PTY's stdin
+	innerX := x0 + 1
+	innerY := y0 + 1
+
+	for y := 0; y < h && y < p.term.rows; y++ {
+		for x := 0; x < w && x < p.term.cols; x++ {
+			c := *p.term.at(x, y)
+			fg, bg := cellToTermbox(c)
+			ch := c.ch
+			if ch == 0 {
+				ch = ' '
+			}
+			termbox.SetCell(innerX+x, innerY+y, ch, fg, bg)
+		}
+	}
+
+	if isFocused {
+		cx = innerX + p.term.x
+		cy = innerY + p.term.y
+		if cx >= innerX && cx < innerX+w && cy >= innerY && cy < innerY+h {
+			hasCursor = true
+		}
+	}
+
+	return cx, cy, hasCursor
+}
+
+// cellToTermbox maps an emulator cell to termbox attributes: default colors map
+// to ColorDefault, reverse video swaps fg/bg, and bold/underline become attr bits.
+func cellToTermbox(c vtCell) (fg, bg termbox.Attribute) {
+	if c.reverse {
+		c.fg, c.bg = c.bg, c.fg
+	}
+	if c.fg == vtDefaultColor {
+		fg = termbox.ColorDefault
+	} else {
+		fg = termbox.Attribute(c.fg + 1)
+	}
+	if c.bg == vtDefaultColor {
+		bg = termbox.ColorDefault
+	} else {
+		bg = termbox.Attribute(c.bg + 1)
+	}
+	if c.bold {
+		fg |= termbox.AttrBold
+	}
+	if c.underline {
+		fg |= termbox.AttrUnderline
+	}
+	return fg, bg
+}
+
+// HandleEvent forwards a termbox key event to the PTY. Returns true if key data was sent.
+func (p *Pane) HandleEvent(ev termbox.Event) bool {
+	data := p.KeyToBytes(ev)
+	if len(data) > 0 {
+		if _, err := p.WriteInput(data); err != nil {
+			log.Printf("Error writing input to PTY for pane %s: %v", p.label(), err)
+		}
+		return true
+	}
+	return false
+}
+
+// AppCursorKeys reports whether application cursor-key mode (DECCKM) is active.
+func (p *Pane) AppCursorKeys() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.term != nil && p.term.decckm
+}
+
+// CopyText copies the pane's scrollback + screen to the system clipboard.
+func (p *Pane) CopyText() (string, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.term == nil {
+		return "", fmt.Errorf("pane not ready")
+	}
+	text := p.term.allText()
+	if text == "" {
+		return "nothing to copy", nil
+	}
+	lines := strings.Count(text, "\n") + 1
+	tool, err := CopyToClipboard(text)
+	if err != nil {
+		return "", err
+	}
+	if tool == "" {
+		return fmt.Sprintf("copied %d lines", lines), nil
+	}
+	return fmt.Sprintf("copied %d lines via %s", lines, tool), nil
+}
+
+// KeyToBytes converts a termbox event into the byte sequence expected by a terminal.
+func (p *Pane) KeyToBytes(ev termbox.Event) []byte {
+	return KeyToBytes(ev, p.AppCursorKeys())
+}
+
+// KeyToBytes converts a termbox event into bytes.
+func KeyToBytes(ev termbox.Event, appCursor bool) []byte {
+	if ev.Type != termbox.EventKey {
+		return nil
+	}
+
+	// Printable characters first: termbox reports a plain character with
+	// Key == 0, which collides with KeyCtrlSpace (also 0). Checking Ch
+	// before the key-code switch keeps letters from being sent as NUL.
+	if ev.Ch != 0 {
+		if ev.Mod&termbox.ModAlt != 0 {
+			return []byte{0x1b, byte(ev.Ch)}
+		}
+		return []byte(string(ev.Ch))
+	}
+
+	arrow := func(csi, ss3 byte) []byte {
+		if appCursor {
+			return []byte{0x1b, 'O', ss3}
+		}
+		return []byte{0x1b, '[', csi}
+	}
+
+	switch ev.Key {
+	case termbox.KeyEnter:
+		return []byte{'\r'}
+	case termbox.KeyBackspace:
+		return []byte{0x7f}
+	case termbox.KeyBackspace2:
+		return []byte{0x08}
+	case termbox.KeyTab:
+		return []byte{'\t'}
+	case termbox.KeyEsc:
+		return []byte{0x1b}
+	case termbox.KeySpace:
+		return []byte{' '}
+	case termbox.KeyArrowUp:
+		return arrow('A', 'A')
+	case termbox.KeyArrowDown:
+		return arrow('B', 'B')
+	case termbox.KeyArrowRight:
+		return arrow('C', 'C')
+	case termbox.KeyArrowLeft:
+		return arrow('D', 'D')
+	case termbox.KeyHome:
+		if appCursor {
+			return []byte{0x1b, 'O', 'H'}
+		}
+		return []byte("\x1b[H")
+	case termbox.KeyEnd:
+		if appCursor {
+			return []byte{0x1b, 'O', 'F'}
+		}
+		return []byte("\x1b[F")
+	case termbox.KeyPgup:
+		return []byte("\x1b[5~")
+	case termbox.KeyPgdn:
+		return []byte("\x1b[6~")
+	case termbox.KeyDelete:
+		return []byte("\x1b[3~")
+	case termbox.KeyInsert:
+		return []byte("\x1b[2~")
+	case termbox.KeyF1:
+		return []byte("\x1bOP")
+	case termbox.KeyF2:
+		return []byte("\x1bOQ")
+	case termbox.KeyF3:
+		return []byte("\x1bOR")
+	case termbox.KeyF4:
+		return []byte("\x1bOS")
+	case termbox.KeyF5:
+		return []byte("\x1b[15~")
+	case termbox.KeyF6:
+		return []byte("\x1b[17~")
+	case termbox.KeyF7:
+		return []byte("\x1b[18~")
+	case termbox.KeyF8:
+		return []byte("\x1b[19~")
+	case termbox.KeyF9:
+		return []byte("\x1b[20~")
+	case termbox.KeyF10:
+		return []byte("\x1b[21~")
+	case termbox.KeyF11:
+		return []byte("\x1b[23~")
+	case termbox.KeyF12:
+		return []byte("\x1b[24~")
+	case termbox.KeyCtrlSpace:
+		return []byte{0}
+	case termbox.KeyCtrlA:
+		return []byte{1}
+	case termbox.KeyCtrlB:
+		return []byte{2}
+	case termbox.KeyCtrlC:
+		return []byte{3}
+	case termbox.KeyCtrlD:
+		return []byte{4}
+	case termbox.KeyCtrlE:
+		return []byte{5}
+	case termbox.KeyCtrlF:
+		return []byte{6}
+	case termbox.KeyCtrlG:
+		return []byte{7}
+	case termbox.KeyCtrlJ:
+		return []byte{10}
+	case termbox.KeyCtrlK:
+		return []byte{11}
+	case termbox.KeyCtrlL:
+		return []byte{12}
+	case termbox.KeyCtrlN:
+		return []byte{14}
+	case termbox.KeyCtrlO:
+		return []byte{15}
+	case termbox.KeyCtrlP:
+		return []byte{16}
+	case termbox.KeyCtrlQ:
+		return []byte{17}
+	case termbox.KeyCtrlR:
+		return []byte{18}
+	case termbox.KeyCtrlS:
+		return []byte{19}
+	case termbox.KeyCtrlT:
+		return []byte{20}
+	case termbox.KeyCtrlU:
+		return []byte{21}
+	case termbox.KeyCtrlV:
+		return []byte{22}
+	case termbox.KeyCtrlW:
+		return []byte{23}
+	case termbox.KeyCtrlX:
+		return []byte{24}
+	case termbox.KeyCtrlY:
+		return []byte{25}
+	case termbox.KeyCtrlZ:
+		return []byte{26}
+	case termbox.KeyCtrl4:
+		return []byte{0x1c}
+	case termbox.KeyCtrl5:
+		return []byte{0x1d}
+	case termbox.KeyCtrl6:
+		return []byte{0x1e}
+	case termbox.KeyCtrl7:
+		return []byte{0x1f}
+	}
+
+	return nil
+}
+
+// WriteInput writes raw bytes to the PTY master.
 func (p *Pane) WriteInput(data []byte) (int, error) {
 	p.ptyMtx.Lock()
 	defer p.ptyMtx.Unlock()
+	if p.pty == nil {
+		return 0, fmt.Errorf("pty closed")
+	}
 	return p.pty.Write(data)
 }
 
-// handleInput handles key presses when the pane is focused, forwarding them to the PTY
-func (p *Pane) handleInput(event *tcell.EventKey) *tcell.EventKey {
-	var data []byte
-	switch event.Key() {
-	case tcell.KeyRune:
-		data = []byte(string(event.Rune()))
-	case tcell.KeyEnter:
-		data = []byte{'\n'}
-	case tcell.KeyBackspace, tcell.KeyBackspace2:
-		data = []byte{0x7f}
-	case tcell.KeyTab:
-		data = []byte{'\t'}
-	case tcell.KeyEscape:
-		data = []byte{0x1b}
-	case tcell.KeyUp:
-		data = []byte("\x1b[A")
-	case tcell.KeyDown:
-		data = []byte("\x1b[B")
-	case tcell.KeyRight:
-		data = []byte("\x1b[C")
-	case tcell.KeyLeft:
-		data = []byte("\x1b[D")
-	default:
-		// Check for Control characters Ctrl+A through Ctrl+Z
-		if event.Key() >= tcell.KeyCtrlA && event.Key() <= tcell.KeyCtrlZ {
-			data = []byte{byte(event.Key())}
-		}
-	}
-
-	if len(data) > 0 {
-		_, err := p.WriteInput(data)
+// readPtyOutput pumps PTY output into the emulator under the pane mutex and
+// wakes the UI with termbox.Interrupt(). It returns when the PTY read fails.
+func (p *Pane) readPtyOutput() {
+	buf := make([]byte, 4096)
+	for {
+		n, err := p.pty.Read(buf)
 		if err != nil {
-			log.Printf("Error writing input to PTY for pane %s: %v", p.label, err)
+			<-p.done
+			return
 		}
-		return nil // Consume event
+		if n > 0 {
+			data := make([]byte, n)
+			copy(data, buf[:n])
+			p.mu.Lock()
+			if p.term != nil {
+				p.term.process(data)
+			}
+			p.mu.Unlock()
+			termbox.Interrupt()
+		}
 	}
-	return event
 }
 
-// Close closes the PTY and kills the command
+// Name returns the pane's identifier.
+func (p *Pane) Name() string { return p.name }
+
+// IsDead reports whether the underlying process has terminated.
+func (p *Pane) IsDead() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.dead
+}
+
+// Close terminates the shell process and closes the PTY.
 func (p *Pane) Close() error {
-	log.Printf("Closing pane %s", p.label)
+	log.Printf("Closing pane %s", p.label())
 	if p.cmd != nil && p.cmd.Process != nil {
-		// Send SIGHUP to the process group to ensure child processes are also killed
-		err := syscall.Kill(-p.cmd.Process.Pid, syscall.SIGHUP)
-		if err != nil {
-			log.Printf("Error sending SIGHUP to pane %s process: %v", p.label, err)
-			// Fallback to Kill if SIGHUP fails or for good measure
-			p.cmd.Process.Kill()
+		if err := p.cmd.Process.Signal(os.Interrupt); err != nil {
+			log.Printf("Error sending interrupt to pane %s process: %v", p.label(), err)
+			if err := p.cmd.Process.Kill(); err != nil {
+				log.Printf("Error killing pane %s process: %v", p.label(), err)
+			}
 		}
-		// Wait for the process to exit
-		p.cmd.Wait()
+		select {
+		case <-p.done:
+		case <-time.After(150 * time.Millisecond):
+			log.Printf("Warning: pane %s process did not exit within timeout, forcing PTY close", p.label())
+		}
 	}
 	if p.pty != nil {
-		return p.pty.Close()
+		if err := p.pty.Close(); err != nil {
+			log.Printf("Error closing PTY for pane %s: %v", p.label(), err)
+			return err
+		}
 	}
 	return nil
 }
