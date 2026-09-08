@@ -7,45 +7,82 @@ loop and one goroutine per pane reading PTY output.
 
 ## Control-flow overview
 
+### Flowchart (renders on GitHub)
+
+```mermaid
+flowchart TD
+    M([main]) --> LOG["open roge.log, log.SetOutput"]
+    LOG --> TB["termbox.Init, SetOutputMode(256)"]
+    TB --> WM["layout.NewWindowManager"]
+    WM --> SP["wm.NewPane(): pty.Start shell<br/>($SHELL → bash → zsh → sh)"]
+    SP --> GS["spawn per-pane goroutines:<br/>readPtyOutput + cmd.Wait"]
+    GS --> R0["render():<br/>termbox.Clear → wm.Draw → termbox.Flush"]
+
+    R0 --> POLL{{"PollEvent() — blocks until an event"}}
+    POLL --> DEAD["CloseDeadPanes():<br/>remove panes whose shell exited, refocus a neighbor"]
+    DEAD --> LAST{panes remain?}
+    LAST -- "no → shouldQuit" --> X[["close every pane → exit"]]
+    LAST -- yes --> SW{"switch ev.Type"}
+
+    SW -- "EventKey" --> HK["handleKey()"]
+    HK -- "consumed" --> MUT["mutate layout tree:<br/>split | focus | zoom | swap | close | resize | jump"]
+    HK -- "forwarded" --> PD["FocusedPane.HandleEvent<br/>→ KeyToBytes → write PTY"]
+    SW -- "EventResize / EventInterrupt" --> RR["render()"]
+    SW -- "EventError" --> EL["log only — no render"]
+
+    MUT --> RR
+    PD --> RR
+    RR --> POLL
+    EL --> POLL
+
+    subgraph BG["background — one set per pane"]
+        RP["readPtyOutput: read → lock →<br/>process → unlock → termbox.Interrupt()"]
+        WT["cmd.Wait: shell exited →<br/>mark pane dead → termbox.Interrupt()"]
+    end
+    RP -. "wake" .-> POLL
+    WT -. "wake" .-> POLL
+```
+
+### Plain-text rendering (terminal-safe)
+
 ```text
-main()                          (main goroutine)
+main() [main goroutine]
+  |
+  +-- 1. open roge.log, log.SetOutput
+  +-- 2. termbox.Init, SetOutputMode(256)
+  +-- 3. layout.NewWindowManager
+  +-- 4. wm.NewPane(): pty.Start(shell: $SHELL -> bash -> zsh -> sh)
+  +-- 5. spawn per-pane goroutines: readPtyOutput, cmd.Wait
+  +-- 6. render(): termbox.Clear -> wm.Draw -> termbox.Flush
   |
   v
-+-- open roge.log, log.SetOutput(f)
-+-- termbox.Init() + termbox.SetOutputMode(termbox.Output256)
-+-- layout.NewWindowManager(), then wm.NewPane()
-|     spawn shell (bash/..) under pty.Start, create 80x24 VT emulator;
-|     start one goroutine per pane: readPtyOutput, cmd.Wait
-+-- render(): termbox.Clear -> wm.Draw(w,h,prefixActive,resizeMode,err) -> termbox.Flush
+PollEvent()                     [blocks; woken by termbox.Interrupt()]
   |
   v
-PollEvent (blocks until a termbox event; any goroutine may termbox.Interrupt())
+CloseDeadPanes(): remove every pane whose shell exited, refocus a neighbor
+  |
+  +-- panes remain? -- no (shouldQuit = true) --> close every pane -> exit
   |
   v
-CloseDeadPanes()                removes every pane whose shell exited,
-  |                             refocuses a neighbor
+switch (ev.Type)
   |
-  +-- was the last pane closed? --yes--> shouldQuit = true
-  |                                  (also set by 'q', or 'x' on the last pane)
-  |                                       |
-  v                                       v
-switch (ev.Type)                 close every pane -> exit
-  |-- EventKey --> handleKey()
-  |      |-- consumed (prefix/resize cmd) --> mutate layout tree
-  |      |       (split/focus/zoom/swap/close/resize/jump)
-  |      +-- forwarded --> FocusedPane().HandleEvent(ev)
-  |                    -> KeyToBytes -> WriteInput(pty)
-  |      --> render()
-  |-- EventResize / EventInterrupt --> render()
-  +-- EventError --> log only, no render
+  +-- EventKey           -> handleKey()
+  |      |-- consumed    -> mutate layout tree
+  |      |                  (split/focus/zoom/swap/close/resize/jump)
+  |      +-- forwarded   -> FocusedPane.HandleEvent
+  |                         -> KeyToBytes -> write PTY
+  |      render()
+  |
+  +-- EventResize / EventInterrupt -> render()
+  |
+  +-- EventError                    -> log only, no render
+  |
   v
 (loop back to PollEvent)
 
-background goroutines (one set per pane)
-  readPtyOutput: read(pty) -> lock pane.mu -> term.process(bytes) -> unlock
-      -> termbox.Interrupt()          (wakes the blocked PollEvent above)
-  cmd.Wait: shell exited -> mark pane dead -> termbox.Interrupt()
-      (the dead flag is consumed by CloseDeadPanes() in the main loop)
+background goroutines (one set per pane):
+  readPtyOutput: read -> lock -> process -> unlock -> termbox.Interrupt()
+  cmd.Wait:      shell exited -> mark pane dead -> termbox.Interrupt()
 ```
 
 ## 1. Startup (`main.go`)

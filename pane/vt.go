@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/mattn/go-runewidth"
 )
 
 // vtDefaultColor marks "use the terminal default" for a cell color.
@@ -19,9 +21,12 @@ const vtDefaultColor = -1
 
 // vtCell is one screen cell.
 type vtCell struct {
-	ch                         rune
-	fg, bg                     int
-	bold, underline, reverse   bool
+	ch        rune
+	fg, bg    int
+	bold      bool
+	underline bool
+	reverse   bool
+	wide      bool // continuation cell of a double-width rune to the left
 }
 
 // blankCell returns the default empty cell (space, default colors).
@@ -52,17 +57,20 @@ type terminal struct {
 	top, bot int // scroll region, 0-based inclusive
 	wrap     bool
 	decckm   bool // application cursor-keys mode (arrows send SS3)
+	// cursorVisible tracks DECTCEM (CSI ?25 h/l); when hidden the cursor is
+	// not drawn even in a focused pane.
+	cursorVisible bool
 
-	g0, g1   int // charsets: 0 = ASCII (B), 1 = DEC special (0)
+	g0, g1   int  // charsets: 0 = ASCII (B), 1 = DEC special (0)
 	gShifted bool // set by SO, cleared by SI
 
 	tabs map[int]bool
 
-	scrollback     [][]vtCell // main-buffer lines scrolled off the top
-	scrollCap      int
-	lastGraphic    rune // for CSI REP (b)
-	pending        []byte
-	respond        func([]byte) // sends bytes back to the PTY (CPR/DA replies)
+	scrollback  [][]vtCell // main-buffer lines scrolled off the top
+	scrollCap   int
+	lastGraphic rune // for CSI REP (b)
+	pending     []byte
+	respond     func([]byte) // sends bytes back to the PTY (CPR/DA replies)
 }
 
 // newTerminal allocates a cols×rows screen in the default state, with respond
@@ -75,17 +83,18 @@ func newTerminal(cols, rows int, respond func([]byte)) *terminal {
 		rows = 1
 	}
 	t := &terminal{
-		cols:      cols,
-		rows:      rows,
-		grid:      make([]vtCell, cols*rows),
-		fg:        vtDefaultColor,
-		bg:        vtDefaultColor,
-		top:       0,
-		bot:       rows - 1,
-		wrap:      true,
-		tabs:      map[int]bool{},
-		scrollCap: 2000,
-		respond:   respond,
+		cols:          cols,
+		rows:          rows,
+		grid:          make([]vtCell, cols*rows),
+		fg:            vtDefaultColor,
+		bg:            vtDefaultColor,
+		top:           0,
+		bot:           rows - 1,
+		wrap:          true,
+		cursorVisible: true,
+		tabs:          map[int]bool{},
+		scrollCap:     2000,
+		respond:       respond,
 	}
 	for i := range t.grid {
 		t.grid[i] = blankCell()
@@ -145,7 +154,7 @@ func (t *terminal) reset() {
 	t.fg, t.bg = vtDefaultColor, vtDefaultColor
 	t.bold, t.underline, t.rev = false, false, false
 	t.top, t.bot = 0, t.rows-1
-	t.wrap, t.decckm = true, false
+	t.wrap, t.decckm, t.cursorVisible = true, false, true
 	t.g0, t.g1, t.gShifted = 0, 0, false
 	t.resetTabs()
 }
@@ -245,9 +254,43 @@ func (t *terminal) put(r rune) {
 			t.x = t.cols - 1
 		}
 	}
+	w := runewidth.RuneWidth(r)
+	if w == 0 {
+		// Combining mark: cells hold a single rune, so the mark is dropped
+		// instead of shifting the row.
+		return
+	}
+	if w > 1 {
+		t.putWide(r)
+		return
+	}
 	c := t.at(t.x, t.y)
 	*c = vtCell{ch: r, fg: t.fg, bg: t.bg, bold: t.bold, underline: t.underline, reverse: t.rev}
 	t.x++
+}
+
+// putWide writes a double-width (East Asian) rune at the cursor, marking the
+// cell to its right as a continuation so Draw can skip it.
+func (t *terminal) putWide(r rune) {
+	if t.cols < 2 {
+		t.put(r)
+		return
+	}
+	if t.x >= t.cols-1 {
+		// At the last column a wide rune cannot fit; wrap or clamp one left.
+		if t.wrap {
+			t.x = 0
+			t.linefeed()
+		} else {
+			t.x = t.cols - 2
+		}
+	}
+	c := t.at(t.x, t.y)
+	*c = vtCell{ch: r, fg: t.fg, bg: t.bg, bold: t.bold, underline: t.underline, reverse: t.rev}
+	if t.x+1 < t.cols {
+		*t.at(t.x+1, t.y) = vtCell{ch: ' ', wide: true}
+	}
+	t.x = min(t.x+2, t.cols-1)
 }
 
 // linefeed moves down, scrolling the region when at its bottom.
@@ -654,6 +697,8 @@ func (t *terminal) setMode(priv string, nums []int, on bool) {
 	}
 	for _, m := range modes {
 		switch m {
+		case 25:
+			t.cursorVisible = on
 		case 1:
 			t.decckm = on
 		case 7:
@@ -837,7 +882,11 @@ func lineText(row []vtCell) string {
 	}
 	var sb strings.Builder
 	for _, c := range row[:end] {
-		sb.WriteRune(c.ch)
+		ch := c.ch
+		if ch == 0 {
+			ch = ' '
+		}
+		sb.WriteRune(ch)
 	}
 	return sb.String()
 }
@@ -938,44 +987,36 @@ func consumeVTST(buf []byte) int {
 
 // acsMap translates DEC special-graphics bytes to unicode (vim borders).
 var acsMap = map[byte]rune{
-	'_':  ' ',
-	'`':  '◆',
-	'a':  '▒',
-	'b':  ' ',
-	'c':  ' ',
-	'd':  ' ',
-	'e':  ' ',
-	'f':  '°',
-	'g':  '±',
-	'h':  '█',
-	'i':  ' ',
-	'j':  '┘',
-	'k':  '┐',
-	'l':  '┌',
-	'm':  '└',
-	'n':  '┼',
-	'o':  '⎺',
-	'p':  '⎻',
-	'q':  '─',
-	'r':  '⎼',
-	's':  '⎽',
-	't':  '├',
-	'u':  '┤',
-	'v':  '┴',
-	'w':  '┬',
-	'x':  '│',
-	'y':  '≤',
-	'z':  '≥',
-	'{':  'π',
-	'|':  '≠',
-	'}':  '£',
-	'~':  '·',
-}
-
-// min returns the smaller of a and b.
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
+	'_': ' ',
+	'`': '◆',
+	'a': '▒',
+	'b': ' ',
+	'c': ' ',
+	'd': ' ',
+	'e': ' ',
+	'f': '°',
+	'g': '±',
+	'h': '█',
+	'i': ' ',
+	'j': '┘',
+	'k': '┐',
+	'l': '┌',
+	'm': '└',
+	'n': '┼',
+	'o': '⎺',
+	'p': '⎻',
+	'q': '─',
+	'r': '⎼',
+	's': '⎽',
+	't': '├',
+	'u': '┤',
+	'v': '┴',
+	'w': '┬',
+	'x': '│',
+	'y': '≤',
+	'z': '≥',
+	'{': 'π',
+	'|': '≠',
+	'}': '£',
+	'~': '·',
 }

@@ -3,7 +3,6 @@ package layout
 import (
 	"fmt"
 	"log"
-	"strings"
 
 	"github.com/nsf/termbox-go"
 
@@ -262,6 +261,16 @@ func (wm *WindowManager) distribute(n *LayoutNode, x0, y0, x1, y1 int) (cursorX,
 	return cursorX, cursorY, hasCursor
 }
 
+// statusDark is a dark-theme color scheme for the status bar: near-black
+// background with light text; the bar turns yellow while a prefix/resize mode
+// is active and red to surface an error.
+const (
+	statusBg  = termbox.Attribute(236) // palette 235
+	statusFg  = termbox.Attribute(253) // palette 252
+	statusHi  = termbox.Attribute(227) // palette 226: bright yellow
+	statusErr = termbox.Attribute(197) // palette 196: red
+)
+
 // renderStatus draws the status line at the bottom of the screen.
 func (wm *WindowManager) renderStatus(maxX, maxY int, prefixActive, resizeMode bool, errorMsg string) {
 	y := maxY - 1
@@ -289,10 +298,12 @@ func (wm *WindowManager) renderStatus(maxX, maxY int, prefixActive, resizeMode b
 	}
 	right += " "
 
-	fg := termbox.ColorBlack
-	bg := termbox.ColorWhite
-	if prefixActive || resizeMode {
-		bg = termbox.ColorYellow
+	fg := statusFg
+	bg := statusBg
+	if errorMsg != "" {
+		fg = statusErr | termbox.AttrBold
+	} else if prefixActive || resizeMode {
+		fg = statusHi | termbox.AttrBold
 	}
 
 	runesLeft := []rune(left)
@@ -312,22 +323,6 @@ func (wm *WindowManager) renderStatus(maxX, maxY int, prefixActive, resizeMode b
 			termbox.SetCell(rightStart+i, y, r, fg, bg)
 		}
 	}
-}
-
-// statusText returns a text representation of the status line.
-func (wm *WindowManager) statusText() string {
-	total := wm.PaneCount()
-	right := ""
-	if total > 0 {
-		right = fmt.Sprintf(" panes: %d", total)
-		if wm.focused != nil {
-			right += fmt.Sprintf(" | pane: %d/%d", wm.PaneIndex(wm.focused), total)
-		}
-	}
-	if wm.zoomed != nil {
-		right += " [ZOOM]"
-	}
-	return " ROGE | Prefix: Ctrl+A then commands... " + right
 }
 
 // NewPane creates a new pane. If the tree is empty it becomes the root;
@@ -677,9 +672,4 @@ func (wm *WindowManager) adjustSize(dir SplitDir, delta int) {
 		newSize = 1
 	}
 	parent.sizes[idx] = newSize
-}
-
-// GetStatus returns a summary string for the status bar.
-func (wm *WindowManager) GetStatus() string {
-	return strings.TrimSpace(wm.statusText())
 }

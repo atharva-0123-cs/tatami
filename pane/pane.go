@@ -13,6 +13,12 @@ import (
 	"github.com/nsf/termbox-go"
 )
 
+// Dark-theme border colors: xterm 256 palette index + 1 (termbox attribute).
+const (
+	colBorder      = termbox.Attribute(240) // palette 239: dim gray
+	colBorderFocus = termbox.Attribute(52)  // palette 51: bright cyan
+)
+
 // Pane wraps a PTY running a shell and a terminal emulator, acting as a single
 // panel in the multiplexer.
 type Pane struct {
@@ -44,20 +50,7 @@ func NewPane(label string) (*Pane, error) {
 		log.Printf("Warning: could not get working directory, defaulting to /: %v", err)
 	}
 
-	candidates := []string{"zsh", os.Getenv("SHELL"), "zsh", "sh"}
-	seen := map[string]bool{}
-	var shells []string
-	for _, s := range candidates {
-		if s == "" || seen[s] {
-			continue
-		}
-		seen[s] = true
-		if path, perr := exec.LookPath(s); perr == nil {
-			shells = append(shells, path)
-		} else {
-			log.Printf("Shell candidate %q not found, skipping: %v", s, perr)
-		}
-	}
+	shells := shellCandidates()
 
 	var (
 		master   *os.File
@@ -68,7 +61,7 @@ func NewPane(label string) (*Pane, error) {
 	for _, sh := range shells {
 		cmd := exec.Command(sh)
 		cmd.Dir = cwd
-		cmd.Env = append(os.Environ(), "TERM=xterm-256color")
+		cmd.Env = setEnv(os.Environ(), "TERM", "xterm-256color")
 		m, serr := pty.Start(cmd)
 		if serr == nil {
 			master = m
@@ -112,12 +105,54 @@ func NewPane(label string) (*Pane, error) {
 // label returns the pane's display number (name without the "pane-" prefix).
 func (p *Pane) label() string { return strings.TrimPrefix(p.name, "pane-") }
 
-// setDead marks the pane as terminated and flags it on the border.
-func (p *Pane) setDead(msg string) {
+// shellCandidates returns the shells to try, preferring $SHELL, deduped and
+// verified to exist in $PATH.
+func shellCandidates() []string {
+	var candidates []string
+	seen := map[string]bool{}
+	add := func(s string) {
+		if s == "" || seen[s] {
+			return
+		}
+		if _, err := exec.LookPath(s); err != nil {
+			log.Printf("Shell candidate %q not found, skipping: %v", s, err)
+			return
+		}
+		seen[s] = true
+		candidates = append(candidates, s)
+	}
+	add(os.Getenv("SHELL"))
+	add("bash")
+	add("zsh")
+	add("sh")
+	return candidates
+}
+
+// setEnv returns env with key=val set, replacing any existing entry instead of
+// appending a duplicate.
+func setEnv(env []string, key, val string) []string {
+	prefix := key + "="
+	for i, e := range env {
+		if strings.HasPrefix(e, prefix) {
+			env[i] = prefix + val
+			return env
+		}
+	}
+	return append(env, prefix+val)
+}
+
+// MarkDead flags the pane as terminated without waking the UI. It is used by
+// tests and tooling to simulate a dead shell.
+func (p *Pane) MarkDead(msg string) {
 	p.mu.Lock()
 	p.dead = true
 	p.exitMsg = msg
 	p.mu.Unlock()
+}
+
+// setDead marks the pane as terminated and flags it on the border.
+func (p *Pane) setDead(msg string) {
+	p.MarkDead(msg)
 	termbox.Interrupt()
 }
 
@@ -151,9 +186,9 @@ func (p *Pane) Draw(x0, y0, x1, y1 int, isFocused bool) (cx, cy int, hasCursor b
 		p.ptyMtx.Unlock()
 	}
 
-	borderAttr := termbox.ColorBlue
+	borderAttr := colBorder
 	if isFocused {
-		borderAttr |= termbox.AttrBold
+		borderAttr = colBorderFocus | termbox.AttrBold
 	}
 
 	// Draw corners
@@ -193,6 +228,9 @@ func (p *Pane) Draw(x0, y0, x1, y1 int, isFocused bool) (cx, cy int, hasCursor b
 	for y := 0; y < h && y < p.term.rows; y++ {
 		for x := 0; x < w && x < p.term.cols; x++ {
 			c := *p.term.at(x, y)
+			if c.wide {
+				continue // right half of a double-width rune drawn at x-1
+			}
 			fg, bg := cellToTermbox(c)
 			ch := c.ch
 			if ch == 0 {
@@ -202,7 +240,7 @@ func (p *Pane) Draw(x0, y0, x1, y1 int, isFocused bool) (cx, cy int, hasCursor b
 		}
 	}
 
-	if isFocused {
+	if isFocused && p.term.cursorVisible {
 		cx = innerX + p.term.x
 		cy = innerY + p.term.y
 		if cx >= innerX && cx < innerX+w && cy >= innerY && cy < innerY+h {
@@ -452,11 +490,9 @@ func (p *Pane) readPtyOutput() {
 			return
 		}
 		if n > 0 {
-			data := make([]byte, n)
-			copy(data, buf[:n])
 			p.mu.Lock()
 			if p.term != nil {
-				p.term.process(data)
+				p.term.process(buf[:n])
 			}
 			p.mu.Unlock()
 			termbox.Interrupt()

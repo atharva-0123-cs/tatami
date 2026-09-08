@@ -154,7 +154,7 @@ func handleKey(ev termbox.Event) bool {
 // main opens the debug log, initializes termbox and the window manager, creates
 // the first pane, then runs the PollEvent loop until the last pane is closed.
 func main() {
-	f, err := os.OpenFile("roge.log", os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
+	f, err := os.OpenFile("roge.log", os.O_RDWR|os.O_CREATE|os.O_APPEND, 0644)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error opening log file: %v\n", err)
 		os.Exit(1)
