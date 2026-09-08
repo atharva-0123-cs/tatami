@@ -4,6 +4,11 @@ A terminal multiplexer written in Go. Each pane runs a real shell in a PTY
 (`creack/pty`), and a small VT100/xterm-compatible emulator decodes the shell's
 output into a cell grid that is drawn straight into the tcell screen buffer.
 
+> **Learning project.** Written from scratch (no multiplexer framework) to
+> learn terminals: PTYs, VT/ANSI emulation, tcell event loops, and tiling
+> layout trees. Expect rough edges, deliberate minimalism, and TODOs rather
+> than production polish.
+
 ## Features
 
 - Horizontal (`Ctrl+A c`) and vertical (`Ctrl+A C`) splits in a nested layout tree

@@ -1,3 +1,6 @@
+// Command tview-demo is the entry point for the "roge" terminal
+// multiplexer: it owns the tcell screen, the Ctrl+A prefix, the resize-mode
+// state, and the PollEvent loop that drives every pane.
 package main
 
 import (
@@ -11,23 +14,44 @@ import (
 	"github.com/atharva-0123-cs/tview-demo/pane"
 )
 
+// Package-level UI state. All of these are only read or written on the main
+// goroutine inside the PollEvent loop (or by the render closure), so no locks
+// are needed around them.
 var (
-	wm           *layout.WindowManager
-	screen       tcell.Screen
-	prefixActive bool
-	resizeMode   bool
-	pasteActive  bool
-	errorMsg     string
-	shouldQuit   bool
+	wm           *layout.WindowManager // the layout tree plus focus/bookkeeping
+	screen       tcell.Screen          // the single tcell screen (one per process)
+	prefixActive bool                  // Ctrl+A prefix mode is armed
+	resizeMode   bool                  // resize mode (Ctrl+A r) is armed
+	pasteActive  bool                  // a bracketed paste is in progress
+	errorMsg     string                // transient status-bar message, cleared on the next key
+	shouldQuit   bool                  // when true the PollEvent loop exits
 )
 
-// setErrorMessage records a status-bar message; it is cleared at the next key press.
+// setErrorMessage records a single status-bar message. The message is shown in
+// the status bar on the next render and stays until the user presses any key:
+// the PollEvent loop clears errorMsg at the start of every EventKey dispatch.
 func setErrorMessage(msg string) {
 	errorMsg = msg
 }
 
-// handleKey processes prefix and resize commands.
-// Returns true if the key event was consumed by the multiplexer.
+// handleKey processes the multiplexer's prefix and resize commands.
+//
+// It returns true when the multiplexer consumed the event (a command ran or a
+// mode was toggled) and false when the caller should forward the event to the
+// focused pane's shell. The precedence is:
+//
+//  1. Escape cancels prefix/resize mode (and is passed to the shell if no
+//     mode was active).
+//  2. Ctrl+A stops resize mode and toggles prefix mode.
+//  3. While resize mode is active, a single h/j/k/l adjusts the focused
+//     pane's size (h/l change the vertical split, k/j the horizontal split)
+//     and ends the mode; any other key just ends it.
+//  4. While prefix mode is active, run the bound command (splits, close,
+//     focus, zoom, rotate, swap, resize, jump, quit). Only plain characters
+//     (KeyRune) trigger letter commands; arrow keys move focus; any other key
+//     simply ends prefix mode without an action, mirroring the historical
+//     termbox behavior where modified keys had Ch == 0.
+//  5. Otherwise the event is forwarded to the shell.
 func handleKey(ev *tcell.EventKey) bool {
 	// Escape cancels prefix and resize mode.
 	if ev.Key() == tcell.KeyEsc {
@@ -161,6 +185,11 @@ func handleKey(ev *tcell.EventKey) bool {
 }
 
 // forwardKey hands an uninterpreted key event to the focused pane's shell.
+//
+// It is used both for keys handleKey did not consume and for every key while
+// a bracketed paste is active. The focused pane translates the tcell event
+// into the byte sequence a terminal expects and writes it to the PTY; if no
+// pane is focused the event is dropped.
 func forwardKey(ev *tcell.EventKey) {
 	if focused := wm.FocusedPane(); focused != nil {
 		focused.HandleEvent(ev)
@@ -170,6 +199,14 @@ func forwardKey(ev *tcell.EventKey) {
 // main opens the debug log, initializes the tcell screen and the window
 // manager, creates the first pane, then runs the PollEvent loop until the
 // last pane is closed.
+//
+// The loop wakes on any event type: keys are routed through handleKey/forwardKey
+// (bracketed paste forwards verbarim), paste start/end marks pasteActive and
+// emits the bracketed-paste delimiters when the shell enabled mode 2004,
+// resize/interrupt events trigger a render, and error events are only logged.
+// Renders always go through the render closure (Clear -> wm.Draw -> Show),
+// which must stay on this goroutine so the tcell screen buffer is only ever
+// touched from the main thread.
 func main() {
 	f, err := os.OpenFile("roge.log", os.O_RDWR|os.O_CREATE|os.O_APPEND, 0644)
 	if err != nil {

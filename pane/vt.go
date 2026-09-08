@@ -6,6 +6,12 @@
 // leak into the pane as garbage text, and fullscreen programs (vim, htop,
 // less) could never work. The emulator keeps the authoritative screen state;
 // each Pane.Draw pass copies its grid into the screen buffer.
+//
+// The emulator is deliberately minimal: it implements the sequences a modern
+// shell and TUI need (SGR colors incl. truecolor, cursor movement, erase,
+// scroll regions, alternate screen, ACS, DECCKM, DECTCEM, DECSET 2004, DA,
+// and CPR) and ignores everything else. It holds no UI references, so it is
+// testable in isolation.
 package pane
 
 import (
@@ -18,6 +24,9 @@ import (
 
 // vtColor is a cell color: either the terminal default, an xterm palette
 // index, or an explicit 24-bit RGB triple (truecolor SGR 38;2/48;2).
+//
+// Exactly one of def / rgb / idx is meaningful: "def" wins when set, otherwise
+// "rgb" when set, otherwise "idx" carries the 0-255 palette index.
 type vtColor struct {
 	def bool
 	rgb bool
@@ -28,12 +37,20 @@ type vtColor struct {
 }
 
 // colorDefault returns the "unset/terminal default" color.
+//
+// Used whenever a cell inherits the terminal's own fg/bg (e.g. after SGR 0,
+// or for the initial blank screen) so the surrounding theme shows through.
 func colorDefault() vtColor { return vtColor{def: true} }
 
 // colorIndex returns a palette color (xterm 256, index 0-255).
+//
+// Produced by SGR 38;5;N / 48;5;N and the classic 30-37/40-47 range.
 func colorIndex(n int) vtColor { return vtColor{idx: n} }
 
 // colorRGB returns a truecolor value (SGR 38;2 / 48;2).
+//
+// Keeps the original components (0-255 each) instead of quantizing to the
+// nearest xterm 256 color, so 24-bit color passes through unchanged.
 func colorRGB(r, g, b int) vtColor { return vtColor{rgb: true, r: r, g: g, b: b} }
 
 // vtCell is one screen cell.
@@ -50,6 +67,9 @@ type vtCell struct {
 func blankCell() vtCell { return vtCell{ch: ' ', fg: colorDefault(), bg: colorDefault()} }
 
 // blankLine returns a row of blank cells of the given width.
+//
+// Used to seed new rows when growing the grid on resize and to build fresh
+// scrollback/alternate buffers.
 func blankLine(cols int) []vtCell {
 	l := make([]vtCell, cols)
 	for i := range l {
@@ -95,6 +115,10 @@ type terminal struct {
 
 // newTerminal allocates a cols×rows screen in the default state, with respond
 // invoked whenever the emulator must send bytes back to the shell (DA/CPR).
+//
+// The initial state is: blank grid, cursor at (0,0) and visible, wrap enabled,
+// scroll region covering the whole screen, default colors, G0/G1 = ASCII with
+// G0 shifted in, tab stops every 8 columns, and bracketed paste off.
 func newTerminal(cols, rows int, respond func([]byte)) *terminal {
 	if cols < 1 {
 		cols = 1
@@ -124,6 +148,8 @@ func newTerminal(cols, rows int, respond func([]byte)) *terminal {
 }
 
 // resetTabs clears the tab-stop map and sets one stop every 8 columns.
+//
+// Tab stops are ANSI-style (like a real terminal booting); reset by CSI g 3.
 func (t *terminal) resetTabs() {
 	t.tabs = map[int]bool{}
 	for x := 8; x < t.cols; x += 8 {
@@ -132,10 +158,18 @@ func (t *terminal) resetTabs() {
 }
 
 // at returns the active-grid cell at (x, y).
+//
+// The active grid is t.grid whether or not the alternate screen is in use
+// (enterAlt swaps buffers into t.grid). Callers must already hold the pane's
+// mutex or be running single-threaded tests.
 func (t *terminal) at(x, y int) *vtCell { return &t.grid[y*t.cols+x] }
 
 // resize keeps the top-left content, clamps the cursor and resets the scroll
 // region. The alternate buffer is dropped (apps redraw on SIGWINCH anyway).
+//
+// Growing the grid pads new rows/columns with blanks; shrinking it clips the
+// right/bottom. This matches what a real terminal does for columns, and
+// matches app expectations for rows since SIGWINCH-driven redraws are the norm.
 func (t *terminal) resize(cols, rows int) {
 	if cols < 1 {
 		cols = 1
@@ -165,6 +199,11 @@ func (t *terminal) resize(cols, rows int) {
 }
 
 // reset restores the initial state (RIS). Scrollback is preserved.
+//
+// This is the emulator-side of ESC c: it blanks the grid, drops the alternate
+// screen, resets color/attributes, cursor, wrap, charsets and tab stops, and
+// restores default visibility/modes, but keeps previously scrolled lines so
+// yank/copy content survives a shell reset.
 func (t *terminal) reset() {
 	for i := range t.grid {
 		t.grid[i] = blankCell()
@@ -184,6 +223,13 @@ func (t *terminal) reset() {
 
 // process feeds raw PTY bytes into the emulator, buffering a truncated tail
 // for the next read.
+//
+// The byte stream is parsed inline: ESC starts a sequence (parseEscape may
+// return -1 when the read ends mid-sequence, in which case the remainder is
+// stashed in t.pending and prepended to the next chunk), C0 bytes below 0x20
+// go through control, DEL is ignored, and everything else is decoded as UTF-8
+// (buffering incomplete trailing runes) and written via put. G1 shifted-in
+// characters route through the DEC special-graphics map.
 func (t *terminal) process(chunk []byte) {
 	var buf []byte
 	if len(t.pending) > 0 {
@@ -236,6 +282,11 @@ func (t *terminal) process(chunk []byte) {
 }
 
 // control handles C0 control bytes.
+//
+// Covers the controls programs actually emit: LF/VT/FF move down (respecting
+// the scroll region), CR returns to column 0, TAB advances to the next stop,
+// BS steps back one column (clamped to 0), and SO/SI swap between the G1 and
+// G0 charsets. All others are ignored.
 func (t *terminal) control(b byte) {
 	switch b {
 	case '\n', '\v', '\f':
@@ -257,6 +308,13 @@ func (t *terminal) control(b byte) {
 }
 
 // put writes a graphic rune at the cursor and advances it.
+//
+// Handles wrap: when the cursor sits at the last column and wrap is enabled
+// (default / DECSET 7), the rune is placed at the start of the next line
+// (scrolling if needed); otherwise it overwrites the last column. Combining
+// marks (runewidth 0) are dropped rather than shifting the row, and
+// double-width runes are delegated to putWide. The cell inherits the current
+// SGR attrs and fg/bg.
 func (t *terminal) put(r rune) {
 	if t.y < 0 {
 		t.y = 0
@@ -292,6 +350,11 @@ func (t *terminal) put(r rune) {
 
 // putWide writes a double-width (East Asian) rune at the cursor, marking the
 // cell to its right as a continuation so Draw can skip it.
+//
+// If the rune would not fit (cursor at the last column) it wraps to the next
+// line (or backs up one column when wrap is off). The continuation cell stores
+// a space with wide=true; Draw renders the lead cell and jumps over the
+// continuation.
 func (t *terminal) putWide(r rune) {
 	if t.cols < 2 {
 		t.put(r)
@@ -315,6 +378,10 @@ func (t *terminal) putWide(r rune) {
 }
 
 // linefeed moves down, scrolling the region when at its bottom.
+//
+// When the cursor is on the bottom line of the scroll region the region is
+// scrolled up one row (the top line enters scrollback for a full-screen main
+// buffer); otherwise the cursor simply advances.
 func (t *terminal) linefeed() {
 	if t.y == t.bot {
 		t.scrollUp(1)
@@ -325,7 +392,8 @@ func (t *terminal) linefeed() {
 	}
 }
 
-// reverseIndex is ESC M.
+// reverseIndex is ESC M: move the cursor up one line, scrolling the region
+// down when the cursor is on its top line.
 func (t *terminal) reverseIndex() {
 	if t.y == t.top {
 		t.scrollDown(1)
@@ -346,6 +414,10 @@ func (t *terminal) nextTab() int {
 
 // scrollUp moves region lines up; the top line enters scrollback when the
 // region is the whole main screen.
+//
+// scrollback capture only happens for the full main screen (no alt buffer, no
+// partial region) so that scrolling in vim or less does not pollute yank
+// history, while plain shell output is fully recoverable.
 func (t *terminal) scrollUp(n int) {
 	if n < 1 {
 		return
@@ -401,6 +473,13 @@ func (t *terminal) pushScrollback(row []vtCell) {
 
 // parseEscape parses one escape sequence at buf[0] == ESC. Returns bytes
 // consumed, or -1 when truncated (wait for more input).
+//
+// The sequence is dispatched on its second byte: CSI (ESC [) goes to
+// parseCSI, OSC (ESC ]) and DCS/SOS/PM/APC (ESC P X ^ _) are consumed up to
+// their terminator, charset designation (ESC ( / ) ), cursor save/restore
+// (ESC 7/8), reverse index (ESC M), linefeed (ESC D), index-to-column-0
+// (ESC E), HTS (ESC H), RIS (ESC c), single shifts (ESC N/O) and a catch-all
+// for other 2-byte sequences are handled inline.
 func (t *terminal) parseEscape(buf []byte) int {
 	if len(buf) < 2 {
 		return -1
@@ -492,6 +571,13 @@ func (t *terminal) clampY(y int) int {
 }
 
 // parseCSI parses "ESC [ params intermediates final".
+//
+// Scans parameter bytes (0x30-0x3F) and intermediate bytes (0x20-0x2F), then
+// dispatches on the final character: cursor movement (H f A B C D E F G d),
+// erase (J K), insert/delete (L M P X @), SGR (m), tab stops (g), scroll (S T),
+// save/restore cursor (s u), scroll region (r), attribute/DA/CPR replies
+// (c n for the emulator side) and mode setting (h l). Private-mode sequences
+// are routed through setMode. Unknown finals are ignored.
 func (t *terminal) parseCSI(buf []byte) int {
 	j := 2
 	for j < len(buf) && buf[j] >= 0x30 && buf[j] <= 0x3F {
@@ -599,6 +685,9 @@ func (t *terminal) parseCSI(buf []byte) int {
 }
 
 // splitParams splits "1;38;5;2" into ints; empty/invalid fields become -1.
+//
+// Empty fields appear in sequences like "ESC [ H" (params "") and
+// "ESC [ ; m"; the -1 sentinel lets pn distinguish "absent" from "0".
 func splitParams(s string) []int {
 	if s == "" {
 		return nil
@@ -629,6 +718,12 @@ func pn(nums []int, i, def int) int {
 }
 
 // sgr applies Select Graphic Rendition attributes.
+//
+// Handles reset (0), bold (1), underline (4), reverse video (7), their
+// negations (22/24/27), the 8 basic fg/bg colors (30-37/40-47), default
+// fg/bg (39/49), bright colors (90-97/100-107), and the extended forms
+// 38;5;N / 48;5;N (xterm palette) and 38;2;R;G;B / 48;2;R;G;B (truecolor).
+// Unsupported attributes are skipped.
 func (t *terminal) sgr(nums []int) {
 	if len(nums) == 0 {
 		t.fg, t.bg = colorDefault(), colorDefault()
@@ -704,6 +799,11 @@ func (t *terminal) sgr(nums []int) {
 }
 
 // setMode handles SM/RM (CSI h/l), including private modes.
+//
+// Tracks the modes the emulator actually represents: 25 (DECTCEM cursor
+// visibility), 1 (DECCKM app cursor keys), 7 (autowrap) and the alternate
+// screen (47/1047/1049) and bracketed paste (2004). Non-private sets and
+// mouse/focus-reporting modes are ignored.
 func (t *terminal) setMode(priv string, nums []int, on bool) {
 	if priv == "" {
 		return // e.g. insert mode: ignore.
@@ -739,6 +839,11 @@ func (t *terminal) setMode(priv string, nums []int, on bool) {
 
 // enterAlt switches to the alternate screen, stashing the main buffer in t.alt
 // along with the main-buffer cursor position.
+//
+// Fullscreen TUI apps (vim, less, htop) enter the alt screen on startup and
+// leave on exit; the main buffer is preserved so the pre-app screen returns
+// intact when the app quits. The alt grid starts blank and its cursor is reset
+// to (0,0).
 func (t *terminal) enterAlt() {
 	if t.altOn {
 		return
@@ -756,6 +861,9 @@ func (t *terminal) enterAlt() {
 
 // exitAlt restores the main buffer. The main buffer was stashed in t.alt by
 // the swap in enterAlt.
+//
+// The main-buffer cursor is restored from msx/msy and the scroll region is
+// reset for the whole screen.
 func (t *terminal) exitAlt() {
 	if !t.altOn {
 		return
@@ -768,6 +876,10 @@ func (t *terminal) exitAlt() {
 
 // deviceAttrs answers the device-attributes query (CSI c) as "VT100 with
 // advanced video" so plain-line apps keep their ANSI behavior.
+//
+// Some shells probe the terminal with CSI c at startup and fall back to a
+// reduced feature set if the answer is unrecognized; answering VT100-with-AVP
+// keeps them in full ANSI mode.
 func (t *terminal) deviceAttrs() {
 	t.sendResponse([]byte("\x1b[?6c"))
 }
@@ -781,6 +893,10 @@ func (t *terminal) sendResponse(b []byte) {
 
 // ------------------------------------------------------------- editing -----
 
+// eraseDisplay implements ED (CSI J): 0 = cursor to end, 1 = start to cursor,
+// 2 = whole screen, 3 = whole screen plus scrollback.
+//
+// Mode 3 also clears the scrollback buffer so the shell can wipe yank history.
 func (t *terminal) eraseDisplay(mode int) {
 	switch mode {
 	case 1: // cursor to start.
@@ -824,6 +940,9 @@ func (t *terminal) eraseLine(mode int) {
 }
 
 // insertLines opens n blank lines at the cursor row within the scroll region.
+//
+// Lines at and below the cursor shift down; any that fall past the region's
+// bottom are clipped. Used by apps for scrolling panes inside a region.
 func (t *terminal) insertLines(n int) {
 	if t.y < t.top || t.y > t.bot || n < 1 {
 		return
@@ -896,6 +1015,9 @@ func (t *terminal) eraseChars(n int) {
 // ------------------------------------------------------------- reading -----
 
 // lineText renders one stored line as plain text without trailing blanks.
+//
+// NUL cells render as spaces; trailing spaces are trimmed so that joined lines
+// do not accumulate padding. Used by dump/allText for tests and copy.
 func lineText(row []vtCell) string {
 	end := len(row)
 	for end > 0 && row[end-1].ch == ' ' {
@@ -913,6 +1035,10 @@ func lineText(row []vtCell) string {
 }
 
 // allText returns scrollback + screen as plain text (for yank/copy).
+//
+// Scrollback lines come first (each followed by a newline), then the visible
+// grid rows. Wide characters appear as their lead rune; a trailing newline is
+// trimmed so the result is line-oriented.
 func (t *terminal) allText() string {
 	var sb strings.Builder
 	for _, row := range t.scrollback {
@@ -933,6 +1059,9 @@ func (t *terminal) allText() string {
 }
 
 // dump returns the visible grid as plain text (used by tests).
+//
+// Lines are rendered like a real terminal's scroll buffer: trailing blanks are
+// trimmed and the final newline is dropped.
 func (t *terminal) dump() string {
 	var sb strings.Builder
 	for y := 0; y < t.rows; y++ {
@@ -947,6 +1076,10 @@ func (t *terminal) dump() string {
 // ------------------------------------------------------------- helpers -----
 
 // consumeVTOSC consumes "ESC ] ... (BEL | ESC \)".
+//
+// OSC payloads (title, clipboard, hyperlinks, OSC133 shell integration) are
+// opaque to the emulator and skipped up to their terminator; returns the
+// number of bytes consumed, or -1 when the terminating byte has not arrived yet.
 func consumeVTOSC(buf []byte) int {
 	for i := 2; i < len(buf); i++ {
 		if buf[i] == 0x07 {
@@ -965,6 +1098,10 @@ func consumeVTOSC(buf []byte) int {
 }
 
 // consumeVTST consumes DCS/SOS/PM/APC up to ST or BEL.
+//
+// Same shape as consumeVTOSC but for the "string"-type sequences (DCS uses
+// these for sixel and status reports; those are ignored here). Returns bytes
+// consumed or -1 when truncated.
 func consumeVTST(buf []byte) int {
 	for i := 2; i < len(buf); i++ {
 		if buf[i] == 0x07 {
@@ -983,6 +1120,10 @@ func consumeVTST(buf []byte) int {
 }
 
 // acsMap translates DEC special-graphics bytes to unicode (vim borders).
+//
+// When G1 (or a shifted G0) is programmed with charset "0", the printable
+// bytes in this range render as box-drawing/special glyphs. vim and other
+// fullscreen apps rely on this for their text drawing.
 var acsMap = map[byte]rune{
 	'_': ' ',
 	'`': '◆',

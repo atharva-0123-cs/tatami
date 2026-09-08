@@ -1,3 +1,8 @@
+// Package layout implements the WindowManager: a tree of LayoutNodes (each
+// leaf holds one Pane, each container splits its children in one direction)
+// plus focus, zoom, split, close, swap, rotate and resize operations. Every
+// render pass walks the tree once to assign each pane a screen rectangle,
+// draws each pane into the tcell screen, and paints the status bar.
 package layout
 
 import (
@@ -22,6 +27,10 @@ const StatusBarHeight = 1
 
 // LayoutNode is a node in the layout tree. A leaf holds a single Pane;
 // a container holds children arranged in one direction.
+//
+// Sibling rectangles within one container never overlap and partition the
+// container's rectangle proportionally to their sizes. Leaf nodes have a nil
+// children/sizes slice; container nodes have a nil Pane.
 type LayoutNode struct {
 	Leaf   bool
 	Pane   *pane.Pane // non-nil only if Leaf
@@ -33,6 +42,9 @@ type LayoutNode struct {
 }
 
 // AddChild appends a child to a container node.
+//
+// The child records this node as its Parent and receives the given
+// proportional flex size; the existing sizes are left unchanged.
 func (n *LayoutNode) AddChild(child *LayoutNode, size int) {
 	child.Parent = n
 	n.children = append(n.children, child)
@@ -40,6 +52,9 @@ func (n *LayoutNode) AddChild(child *LayoutNode, size int) {
 }
 
 // RemoveChild removes a child from a container node.
+//
+// The child's Parent is cleared, and both the children and matching size
+// entries are removed. If child is not present the node is unchanged.
 func (n *LayoutNode) RemoveChild(child *LayoutNode) {
 	for i, c := range n.children {
 		if c == child {
@@ -58,6 +73,10 @@ func (n *LayoutNode) Children() []*LayoutNode { return n.children }
 func (n *LayoutNode) Sizes() []int { return n.sizes }
 
 // ReplaceChild replaces oldChild with newChild in the parent container.
+//
+// The new child adopts the container as its Parent; oldChild is detached. The
+// proportional sizes are kept as-is (the replacement inherits the old slot's
+// weight). If oldChild is not found the tree is unchanged.
 func (n *LayoutNode) ReplaceChild(oldChild, newChild *LayoutNode) {
 	for i, c := range n.children {
 		if c == oldChild {
@@ -78,6 +97,9 @@ type WindowManager struct {
 }
 
 // NewWindowManager creates a new WindowManager.
+//
+// The tree starts empty; the initial pane is created lazily by Draw (or by the
+// caller calling NewPane directly).
 func NewWindowManager() *WindowManager {
 	return &WindowManager{}
 }
@@ -86,6 +108,8 @@ func NewWindowManager() *WindowManager {
 func (wm *WindowManager) FocusedPane() *pane.Pane { return wm.focused }
 
 // PaneCount returns the total number of live panes.
+//
+// Counts the leaves of the tree (excluding empty/nil leaves) by walking it.
 func (wm *WindowManager) PaneCount() int {
 	count := 0
 	wm.walk(wm.root, func(n *LayoutNode) {
@@ -97,6 +121,9 @@ func (wm *WindowManager) PaneCount() int {
 }
 
 // PaneIndex returns the 1-based index of the given pane in traversal order.
+//
+// Used by the status bar ("pane: 2/5") and by prefix-number jumps. Returns -1
+// when the pane is not in the tree.
 func (wm *WindowManager) PaneIndex(p *pane.Pane) int {
 	idx := 0
 	found := -1
@@ -123,9 +150,15 @@ func (wm *WindowManager) collectPanes() []*pane.Pane {
 }
 
 // CollectPanes returns all leaf panes in tree order (public).
+//
+// Depth-first traversal order matches the user's visual left-to-right /
+// top-to-bottom reading order, so pane N lines up with the Nth split.
 func (wm *WindowManager) CollectPanes() []*pane.Pane { return wm.collectPanes() }
 
 // walk traverses the tree depth-first, calling fn on every node.
+//
+// A nil tree visits nothing; children are visited after their parent so callers
+// receive both containers and leaves unless they filter by n.Leaf.
 func (wm *WindowManager) walk(n *LayoutNode, fn func(*LayoutNode)) {
 	if n == nil {
 		return
@@ -137,6 +170,8 @@ func (wm *WindowManager) walk(n *LayoutNode, fn func(*LayoutNode)) {
 }
 
 // findLeaf returns the leaf node that contains the given pane.
+//
+// Returns nil when the pane is not in the tree (e.g. already closed).
 func (wm *WindowManager) findLeaf(p *pane.Pane) *LayoutNode {
 	var found *LayoutNode
 	wm.walk(wm.root, func(n *LayoutNode) {
@@ -148,6 +183,19 @@ func (wm *WindowManager) findLeaf(p *pane.Pane) *LayoutNode {
 }
 
 // Draw lays out and draws all panes and the status bar into the screen.
+//
+// Steps:
+//  1. Lazily create the first pane if the tree is empty, unless the tree is
+//     completely gone (then only the status bar is drawn).
+//  2. Reserve StatusBarHeight rows at the bottom for the status bar.
+//  3. Iterate the tree with distribute to assign rectangles and draw every
+//     pane (a zoomed pane draws alone at full size).
+//  4. Collect the focused pane's logical cursor and show/hide it via
+//     ShowCursor/HideCursor.
+//  5. renderStatus paints the bottom line.
+//
+// Draw must run on the main goroutine (it touches the tcell screen buffer and,
+// inside each Pane.Draw, resizes PTYs).
 func (wm *WindowManager) Draw(screen tcell.Screen, width, height int, prefixActive, resizeMode bool, errorMsg string) {
 	if width <= 0 || height <= 0 {
 		return
@@ -199,6 +247,17 @@ func (wm *WindowManager) Draw(screen tcell.Screen, width, height int, prefixActi
 }
 
 // distribute recursively assigns rectangles to the nodes of the tree.
+//
+// Leaves draw their pane (Pane.Draw) when their rectangle is non-empty and
+// report whether the focused pane's cursor landed there. Containers partition
+// their rectangle along their SplitDir proportionally to each child's size
+// weight: horizontal splits stack children top-to-bottom (each child gets a
+// band of height avail*size/total, the last child absorbing rounding
+// remainder), vertical splits lay children out left-to-right the same way for
+// widths. The focused pane's cursor coordinates bubble up to Draw.
+//
+// distribute returns (cursorX, cursorY, hasCursor); hasCursor is true only for
+// the focused pane's draw when its cursor is visible.
 func (wm *WindowManager) distribute(n *LayoutNode, x0, y0, x1, y1 int, screen tcell.Screen) (cursorX, cursorY int, hasCursor bool) {
 	if n == nil {
 		return 0, 0, false
@@ -272,6 +331,12 @@ const (
 )
 
 // renderStatus draws the status line at the bottom of the screen.
+//
+// The left half shows the mode banner (" ROGE | [PREFIX] ...", "[RESIZE] ..."
+// or an error message) in the highlighted color while a mode/error is active;
+// the right half shows the pane count and focused index (plus "[ZOOM]" when
+// zoomed). The whole row is blanked first so stale glyphs never survive from a
+// previous size. Must run on the main goroutine.
 func (wm *WindowManager) renderStatus(screen tcell.Screen, maxX, maxY int, prefixActive, resizeMode bool, errorMsg string) {
 	y := maxY - 1
 	left := " ROGE "
@@ -332,6 +397,9 @@ func (wm *WindowManager) renderStatus(screen tcell.Screen, maxX, maxY int, prefi
 
 // NewPane creates a new pane. If the tree is empty it becomes the root;
 // otherwise it splits the currently focused pane horizontally (top/bottom).
+//
+// The pane label is derived from the monotonic paneCount so pane numbers never
+// repeat even after closes, and the new pane takes focus.
 func (wm *WindowManager) NewPane() error {
 	wm.paneCount++
 	label := fmt.Sprintf("%d", wm.paneCount)
@@ -352,6 +420,9 @@ func (wm *WindowManager) NewPane() error {
 }
 
 // NewPaneVertical creates a new pane by splitting the focused pane vertically.
+//
+// Same as NewPane but the focused pane is split left/right instead of
+// top/bottom.
 func (wm *WindowManager) NewPaneVertical() error {
 	wm.paneCount++
 	label := fmt.Sprintf("%d", wm.paneCount)
@@ -372,6 +443,17 @@ func (wm *WindowManager) NewPaneVertical() error {
 }
 
 // splitCurrent splits the currently focused pane, inserting newPane as a sibling.
+//
+// Three cases:
+//   - the focused leaf is the root: wrap both in a new container of the given
+//     direction, making it the root;
+//   - the focused leaf's parent already splits in the same direction: insert
+//     the new leaf directly after it in that parent;
+//   - otherwise: replace the focused leaf with a fresh container (newly
+//     splitting in the requested direction) holding the two leaves.
+//
+// The new pane always becomes focused and the two siblings start with equal
+// size weights.
 func (wm *WindowManager) splitCurrent(newPane *pane.Pane, dir SplitDir) {
 	focusedNode := wm.findLeaf(wm.focused)
 	if focusedNode == nil {
@@ -427,6 +509,10 @@ func (wm *WindowManager) CloseCurrentPane() bool {
 
 // CloseDeadPanes removes every pane whose shell process has exited. It returns
 // true if the last pane was closed (the app should quit).
+//
+// Called at the top of every event-loop iteration; panes that were marked dead
+// by their process-exit goroutine get closed and the tree is refocused so the
+// UI always shows a live neighbor.
 func (wm *WindowManager) CloseDeadPanes() bool {
 	if wm.root == nil {
 		return false
@@ -456,6 +542,11 @@ func (wm *WindowManager) closePane(p *pane.Pane) bool {
 
 // closeLeaf removes the given leaf node from the layout tree, closes its pane,
 // and re-focuses a neighbor. Returns true if the last pane was closed.
+//
+// After removal, single-child containers collapse upward and empty containers
+// are pruned so the tree stays canonical. Focus moves to the sibling that
+// occupied the adjacent slot (or the first remaining pane); when nothing is
+// left the tree is cleared and true is returned.
 func (wm *WindowManager) closeLeaf(focusedNode *LayoutNode) bool {
 	p := focusedNode.Pane
 	if err := p.Close(); err != nil {
@@ -511,6 +602,9 @@ func (wm *WindowManager) closeLeaf(focusedNode *LayoutNode) bool {
 }
 
 // pickSibling returns the nearest sibling to focus after closing a pane.
+//
+// Prefers the sibling after the closed one (matching the visual "next" slot),
+// falling back to the one before it.
 func (wm *WindowManager) pickSibling(n *LayoutNode) *LayoutNode {
 	parent := n.Parent
 	if parent == nil {
@@ -540,6 +634,12 @@ func (wm *WindowManager) firstPane(n *LayoutNode) *pane.Pane {
 }
 
 // MoveFocus moves focus in the given direction relative to the current pane.
+//
+// Scans outward from the focused leaf's ancestors: the closest ancestor whose
+// split direction matches dir offers a sibling slot delta positions away
+// (SplitHorizontal: up/down; SplitVertical: left/right). Focus moves to the
+// first pane inside that sibling, so crossing is always to the "nearest"
+// neighbor in that direction.
 func (wm *WindowManager) MoveFocus(dir SplitDir, delta int) {
 	if wm.focused == nil || wm.root == nil {
 		return
@@ -588,6 +688,10 @@ func (wm *WindowManager) FocusUp()   { wm.MoveFocus(SplitHorizontal, -1) }
 func (wm *WindowManager) FocusDown() { wm.MoveFocus(SplitHorizontal, 1) }
 
 // Zoom toggles zoom on the current pane.
+//
+// Zoomed panes are drawn alone at the full pane region (distribute is
+// bypassed), which effectively maximizes that pane while preserving the rest
+// of the tree. Zooming again un-zooms.
 func (wm *WindowManager) Zoom() {
 	if wm.focused == nil {
 		return
@@ -605,6 +709,9 @@ func (wm *WindowManager) SwapPrev() { wm.swapPane(-1) }
 
 // swapPane swaps the focused pane's tree node with its neighbor `delta`
 // positions away in the same parent (+1 next, -1 previous).
+//
+// Only the node and its size weight swap places; focus stays with the
+// (now relocated) pane. No-ops when the neighbor is out of range.
 func (wm *WindowManager) swapPane(delta int) {
 	if wm.focused == nil || wm.root == nil {
 		return
@@ -624,6 +731,10 @@ func (wm *WindowManager) swapPane(delta int) {
 }
 
 // RotateFocused rotates all siblings in the parent container by one position.
+//
+// delta > 0 rotates right (last sibling becomes first), delta < 0 rotates
+// left. Size weights travel with their siblings. No-op for containers with
+// fewer than two children.
 func (wm *WindowManager) RotateFocused(delta int) {
 	if wm.focused == nil || wm.root == nil {
 		return
@@ -659,6 +770,11 @@ func (wm *WindowManager) IncreaseSize(dir SplitDir) { wm.adjustSize(dir, 1) }
 func (wm *WindowManager) DecreaseSize(dir SplitDir) { wm.adjustSize(dir, -1) }
 
 // adjustSize nudges the focused pane's size proportion by delta, floored at 1.
+//
+// Only applies when the focused pane's parent splits in the given direction
+// (so left/right resize only works on vertical splits, up/down on horizontal
+// ones). The sibling proportions stay fixed; the layout reflows on the next
+// Draw. Sizes are floored at 1 so a pane can never disappear entirely.
 func (wm *WindowManager) adjustSize(dir SplitDir, delta int) {
 	if wm.focused == nil || wm.root == nil {
 		return

@@ -7,6 +7,14 @@ import (
 	"github.com/gdamore/tcell/v2"
 )
 
+// TestKeyToBytes verifies that the package-level KeyToBytes maps tcell key
+// events to the byte sequences a terminal expects.
+//
+// The table covers: printable runes (with and without Alt), the control keys
+// Enter/Backspace/Tab/Esc, the full Ctrl letter range (1-26 via spot checks:
+// Ctrl-A/C/Z) plus the special C0 codes (Ctrl-Space, Ctrl-\, ], ^, _), arrows
+// in both normal (CSI) and DECCKM (SS3) forms, Home/End/PgUp/PgDn/Delete/F
+// keys, and error cases that must return nil (KeyNUL and a nil event).
 func TestKeyToBytes(t *testing.T) {
 	cases := []struct {
 		name      string

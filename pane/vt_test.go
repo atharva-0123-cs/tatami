@@ -5,15 +5,20 @@ import (
 	"testing"
 )
 
+// newTestTerm returns a ready-to-use 20x5 emulator in the default state, with
+// no respond callback (the tests never trigger DA/CPR replies).
 func newTestTerm() *terminal {
 	return newTerminal(20, 5, nil)
 }
 
+// feed feeds raw escape-sequence bytes into the emulator as one process chunk.
 func feed(t *testing.T, term *terminal, in string) {
 	t.Helper()
 	term.process([]byte(in))
 }
 
+// TestPutBasic checks that plain printable characters land in the grid at the
+// cursor and advance it.
 func TestPutBasic(t *testing.T) {
 	term := newTestTerm()
 	feed(t, term, "hello")
@@ -22,6 +27,8 @@ func TestPutBasic(t *testing.T) {
 	}
 }
 
+// TestCursorMovement verifies CSI row/column addressing (H) and the relative
+// up (A) / left (D) motions, including clamping at column 0.
 func TestCursorMovement(t *testing.T) {
 	term := newTestTerm()
 	feed(t, term, "\x1b[2;3H")
@@ -40,6 +47,8 @@ func TestCursorMovement(t *testing.T) {
 	}
 }
 
+// TestEraseLine verifies EC (CSI K) erases from the cursor to the end of the
+// line.
 func TestEraseLine(t *testing.T) {
 	term := newTestTerm()
 	feed(t, term, "abcdefgh")
@@ -49,6 +58,7 @@ func TestEraseLine(t *testing.T) {
 	}
 }
 
+// TestEraseDisplay verifies ED (CSI 2J) blanks the whole screen.
 func TestEraseDisplay(t *testing.T) {
 	term := newTestTerm()
 	feed(t, term, "abc\r\ndef")
@@ -58,6 +68,9 @@ func TestEraseDisplay(t *testing.T) {
 	}
 }
 
+// TestAltScreen exercises the alternate-screen buffer (CSI ?1049 h/l): writing
+// while the alt screen is active must not disturb the main buffer, and leaving
+// it restores the main buffer and its content.
 func TestAltScreen(t *testing.T) {
 	term := newTestTerm()
 	feed(t, term, "main")
@@ -78,6 +91,9 @@ func TestAltScreen(t *testing.T) {
 	}
 }
 
+// TestACSGraphics verifies DEC special-graphics: programming G1 with charset 0
+// (ESC )0) and shifting it in with SO turns 'q' into a box-drawing horizontal
+// line, while SI returns to ASCII.
 func TestACSGraphics(t *testing.T) {
 	term := newTestTerm()
 	feed(t, term, "\x1b)0") // program G1 with DEC special graphics
@@ -90,6 +106,9 @@ func TestACSGraphics(t *testing.T) {
 	}
 }
 
+// TestWideChars verifies a double-width CJK rune occupies two cells (the lead
+// cell plus a marked continuation), advances the cursor by two, and does not
+// corrupt the following narrow character.
 func TestWideChars(t *testing.T) {
 	term := newTestTerm()
 	feed(t, term, "\u4f60a") // CJK wide, then narrow
@@ -111,6 +130,8 @@ func TestWideChars(t *testing.T) {
 	}
 }
 
+// TestWideCharsWrapAtLastColumn checks that a wide rune at the last column
+// wraps to the next line (with wrap enabled) instead of corrupting cells.
 func TestWideCharsWrapAtLastColumn(t *testing.T) {
 	term := newTerminal(5, 3, nil)
 	feed(t, term, "\x1b[5G") // cursor to last column (x=4)
@@ -123,6 +144,8 @@ func TestWideCharsWrapAtLastColumn(t *testing.T) {
 	}
 }
 
+// TestCombiningMarksDropped verifies that zero-width combining marks are
+// discarded without advancing the cursor (cells store a single rune).
 func TestCombiningMarksDropped(t *testing.T) {
 	term := newTestTerm()
 	feed(t, term, "e\u0301")
@@ -134,6 +157,8 @@ func TestCombiningMarksDropped(t *testing.T) {
 	}
 }
 
+// TestScrollbackAndAllText verifies that lines scrolled off the top of a
+// full-screen main buffer enter scrollback and are included by allText.
 func TestScrollbackAndAllText(t *testing.T) {
 	term := newTerminal(5, 2, nil)
 	feed(t, term, "123\r\n456\r\n7")
@@ -142,6 +167,8 @@ func TestScrollbackAndAllText(t *testing.T) {
 	}
 }
 
+// TestSGRColors verifies ANSI fg/bg attribute parsing: 38;5;196 selects a
+// palette foreground, and SGR 0 resets the foreground to default.
 func TestSGRColors(t *testing.T) {
 	term := newTestTerm()
 	feed(t, term, "\x1b[38;5;196mX")
@@ -154,6 +181,8 @@ func TestSGRColors(t *testing.T) {
 	}
 }
 
+// TestSGRTruecolor verifies 24-bit SGR parsing for both foreground (38;2;R;G;B)
+// and background (48;2;R;G;B), with the original components preserved.
 func TestSGRTruecolor(t *testing.T) {
 	term := newTestTerm()
 	feed(t, term, "\x1b[38;2;255;0;128mX")
@@ -168,6 +197,8 @@ func TestSGRTruecolor(t *testing.T) {
 	}
 }
 
+// TestBracketedPasteMode verifies DECSET 2004 toggles the bracketed-paste flag
+// that the UI uses to wrap pasted input.
 func TestBracketedPasteMode(t *testing.T) {
 	term := newTestTerm()
 	if term.bracketedPaste {
@@ -183,6 +214,9 @@ func TestBracketedPasteMode(t *testing.T) {
 	}
 }
 
+// TestScrollRegion verifies that a restricted scroll region (CSI r) only
+// accepts line feeds within it: rows above the region stay untouched and the
+// bottom of the region is cleared when a line is scrolled in.
 func TestScrollRegion(t *testing.T) {
 	term := newTestTerm()
 	feed(t, term, "\x1b[2;4r")
@@ -202,6 +236,8 @@ func TestScrollRegion(t *testing.T) {
 	}
 }
 
+// TestCursorVisibleMode verifies DECTCEM: CSI ?25 l hides the cursor and
+// CSI ?25 h restores it.
 func TestCursorVisibleMode(t *testing.T) {
 	term := newTestTerm()
 	if !term.cursorVisible {

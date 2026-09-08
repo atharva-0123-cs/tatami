@@ -1,3 +1,8 @@
+// Package pane provides the Pane type: a real shell running in a PTY paired
+// with a small VT100/xterm-compatible terminal emulator (see vt.go). Each
+// Pane owns one PTY, one goroutine that pumps shell output into the emulator,
+// and one goroutine that waits for the shell process to exit; the emulated
+// grid is drawn into the tcell screen by the main goroutine.
 package pane
 
 import (
@@ -25,6 +30,11 @@ var Interrupt = func() {}
 
 // Pane wraps a PTY running a shell and a terminal emulator, acting as a single
 // panel in the multiplexer.
+//
+// Concurrency: the emulator grid (term) may only be touched under mu, which
+// guards both the PTY-output goroutine (writing) and Draw (reading). Writes to
+// the PTY master are serialized by ptyMtx so keystrokes and hot-path writes
+// (e.g. bracketed-paste delimiters) never interleave mid-sequence.
 type Pane struct {
 	name    string
 	pty     *os.File
@@ -42,6 +52,16 @@ type Pane struct {
 }
 
 // NewPane creates a new pane and starts a shell in a PTY.
+//
+// The shell is chosen by shellCandidates (user's $SHELL first), and is started
+// in the current working directory with TERM forced to xterm-256color so full
+// color support is active regardless of the enclosing terminal. The PTY is
+// created at 80x24; the real size is applied on the first Draw pass.
+//
+// Two goroutines are spawned per pane: readPtyOutput pumps the shell's output
+// into the emulator, and a Wait goroutine marks the pane dead when the shell
+// exits (closing p.done). NewPane fails only if no candidate shell could be
+// started.
 func NewPane(label string) (*Pane, error) {
 	p := &Pane{
 		name: "pane-" + label,
@@ -111,6 +131,10 @@ func (p *Pane) label() string { return strings.TrimPrefix(p.name, "pane-") }
 
 // shellCandidates returns the shells to try, preferring $SHELL, deduped and
 // verified to exist in $PATH.
+//
+// The order is: $SHELL if set, then bash, zsh, sh. Candidates that cannot be
+// resolved are logged and skipped so NewPane can quietly fall through to a
+// shell that does exist.
 func shellCandidates() []string {
 	var candidates []string
 	seen := map[string]bool{}
@@ -134,6 +158,9 @@ func shellCandidates() []string {
 
 // setEnv returns env with key=val set, replacing any existing entry instead of
 // appending a duplicate.
+//
+// os.Environ() may already contain "TERM=..."; replacing in place (rather than
+// appending a second entry) keeps the variable list small and unambiguous.
 func setEnv(env []string, key, val string) []string {
 	prefix := key + "="
 	for i, e := range env {
@@ -147,6 +174,10 @@ func setEnv(env []string, key, val string) []string {
 
 // MarkDead flags the pane as terminated without waking the UI. It is used by
 // tests and tooling to simulate a dead shell.
+//
+// Unlike setDead it does not call Interrupt, so a MarkDead alone does not
+// trigger a render; the main loop discovers the flag on its next CloseDeadPanes
+// pass.
 func (p *Pane) MarkDead(msg string) {
 	p.mu.Lock()
 	p.dead = true
@@ -154,7 +185,9 @@ func (p *Pane) MarkDead(msg string) {
 	p.mu.Unlock()
 }
 
-// setDead marks the pane as terminated and flags it on the border.
+// setDead marks the pane as terminated and flags it on the border, then wakes
+// the UI so the main loop can auto-close the pane. It is called from the
+// process-exit waiter goroutine.
 func (p *Pane) setDead(msg string) {
 	p.MarkDead(msg)
 	Interrupt()
@@ -163,6 +196,15 @@ func (p *Pane) setDead(msg string) {
 // Draw renders the border and terminal cells onto the screen within
 // [x0, y0, x1, y1). Returns the absolute cursor coordinates and whether the
 // cursor is visible.
+//
+// Per frame it: (1) records the rectangle and, if the inner size changed,
+// resizes the emulator and pushes the new size to the shell via
+// pty.Setsize so SIGWINCH reaches it; (2) paints the border (rounded corners,
+// top/bottom, left/right) in the focus color, plus a "exited (...)" stub when
+// the shell died; (3) copies the emulator grid into the screen buffer, skipping
+// the continuation cells of double-width runes; (4) reports the logical cursor
+// position (only meaningful when focused, and only when DECTCEM says it is
+// visible). Run only from the main goroutine.
 func (p *Pane) Draw(x0, y0, x1, y1 int, isFocused bool, screen tcell.Screen) (cx, cy int, hasCursor bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -259,6 +301,11 @@ func (p *Pane) Draw(x0, y0, x1, y1 int, isFocused bool, screen tcell.Screen) (cx
 // fg/bg, default colors map to ColorDefault, palette cells carry their index,
 // and truecolor cells carry their original RGB components; bold and underline
 // become style attributes.
+//
+// The vtColor->tcell.Color translation mirrors the inverse of the emulator's
+// SGR parsing: default stays default (so the surrounding terminal theme wins),
+// palette indices map through tcell.PaletteColor, and RGB triples map through
+// tcell.NewRGBColor.
 func cellToStyle(c vtCell) tcell.Style {
 	if c.reverse {
 		c.fg, c.bg = c.bg, c.fg
@@ -288,6 +335,11 @@ func cellToStyle(c vtCell) tcell.Style {
 }
 
 // HandleEvent forwards a tcell key event to the PTY. Returns true if key data was sent.
+//
+// It converts the event to bytes via KeyToBytes (taking the pane's current
+// DECCKM application-cursor mode into account) and writes them to the shell. A
+// false return means the event mapped to nothing (e.g. an unknown key) and no
+// bytes were written.
 func (p *Pane) HandleEvent(ev *tcell.EventKey) bool {
 	data := p.KeyToBytes(ev)
 	if len(data) > 0 {
@@ -300,6 +352,10 @@ func (p *Pane) HandleEvent(ev *tcell.EventKey) bool {
 }
 
 // AppCursorKeys reports whether application cursor-key mode (DECCKM) is active.
+//
+// KeyToBytes needs this so arrow/home/end keys are sent in the SS3 form
+// (ESC O A) that fullscreen apps expect. The flag is altered by the emulator's
+// mode processing, so it is read under the pane mutex.
 func (p *Pane) AppCursorKeys() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -307,6 +363,11 @@ func (p *Pane) AppCursorKeys() bool {
 }
 
 // CopyText copies the pane's scrollback + screen to the system clipboard.
+//
+// It extracts the pane's renderable text (scrollback lines plus the visible
+// grid), hands it to the clipboard helper, and returns a status string
+// suitable for the status bar ("copied N lines", "copied N lines via <tool>",
+// or an error message). Run on the main goroutine.
 func (p *Pane) CopyText() (string, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -330,6 +391,10 @@ func (p *Pane) CopyText() (string, error) {
 
 // Paste reports whether the pane's shell has enabled bracketed paste
 // (DECSET 2004), so the UI should wrap pasted input in ESC[200~/ESC[201~.
+//
+// When the shell turns mode 2004 on it expects the app to delimit every paste;
+// these markers let the shell treat the pasted bytes as data instead of
+// keystrokes (so newlines in a paste do not execute commands).
 func (p *Pane) Paste() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -337,11 +402,26 @@ func (p *Pane) Paste() bool {
 }
 
 // KeyToBytes converts a tcell event into the byte sequence expected by a terminal.
+//
+// Pane-level wrapper: captures the pane's current DECCKM mode and delegates to
+// the package-level function.
 func (p *Pane) KeyToBytes(ev *tcell.EventKey) []byte {
 	return KeyToBytes(ev, p.AppCursorKeys())
 }
 
 // KeyToBytes converts a tcell event into bytes.
+//
+// The translation rules mirror what a real terminal driver does:
+//   - printable runes (KeyRune) are transmitted as-is, with Meta/Alt prefixing
+//     ESC (0x1b);
+//   - Enter/Backspace/Tab map to CR, DEL (0x7f) and TAB;
+//   - arrows/home/end use CSI (ESC [ ...) or, when appCursor (DECCKM) is set,
+//     SS3 (ESC O ...);
+//   - function keys, page keys, Delete and Insert use their xterm codes;
+//   - Ctrl+letter pairs map to bytes 1..26; the special Ctrl codes (space,
+//     \, ], ^, _) map to their C0 byte equivalents.
+//
+// Returns nil for events that have no byte representation (e.g. KeyNUL).
 func KeyToBytes(ev *tcell.EventKey, appCursor bool) []byte {
 	if ev == nil {
 		return nil
@@ -446,6 +526,10 @@ func KeyToBytes(ev *tcell.EventKey, appCursor bool) []byte {
 }
 
 // WriteInput writes raw bytes to the PTY master.
+//
+// Serialized with ptyMtx so a key sequence and a bracketed-paste delimiter
+// never interleave. Returns an error only if the PTY is closed or the write
+// itself fails.
 func (p *Pane) WriteInput(data []byte) (int, error) {
 	p.ptyMtx.Lock()
 	defer p.ptyMtx.Unlock()
@@ -457,6 +541,12 @@ func (p *Pane) WriteInput(data []byte) (int, error) {
 
 // readPtyOutput pumps PTY output into the emulator under the pane mutex and
 // wakes the UI by calling Interrupt(). It returns when the PTY read fails.
+//
+// One goroutine per pane, started by NewPane. Every read chunk is fed to the
+// emulator while holding mu (so no Draw can observe a half-applied chunk), then
+// Interrupt posts an EventInterrupt so the main loop renders the update. When
+// the shell exits the PTY read fails; readPtyOutput waits for the Wait
+// goroutine to close p.done and exits.
 func (p *Pane) readPtyOutput() {
 	buf := make([]byte, 4096)
 	for {
@@ -480,6 +570,9 @@ func (p *Pane) readPtyOutput() {
 func (p *Pane) Name() string { return p.name }
 
 // IsDead reports whether the underlying process has terminated.
+//
+// Set by the Wait goroutine (via setDead); the main loop polls this from
+// CloseDeadPanes on every event to auto-close exited panes.
 func (p *Pane) IsDead() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -488,6 +581,12 @@ func (p *Pane) IsDead() bool {
 
 // Close terminates the shell process and closes the PTY. For a pane whose
 // process has already exited, only the PTY is closed.
+//
+// A running shell first gets SIGINT and is given 150 ms to exit; if it is
+// still alive after the wait (or sending the signal failed) it is killed. The
+// PTY master is then closed, which also unblocks readPtyOutput. Close is
+// idempotent with respect to a subsequent double-close because a closed PTY
+// fails subsequent writes/reads rather than panicking.
 func (p *Pane) Close() error {
 	log.Printf("Closing pane %s", p.label())
 	if p.cmd != nil && p.cmd.Process != nil && !p.IsDead() {

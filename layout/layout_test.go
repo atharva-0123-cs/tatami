@@ -8,6 +8,10 @@ import (
 
 // newWMWithPanes builds a Stacked (SplitHorizontal) tree of n zero-value panes
 // and returns the manager plus the panes in traversal order.
+//
+// The panes are zero-value pane.Pane structs (no PTY/emulator) so the tests
+// exercise only the tree/bookkeeping logic; the manager's focus ends on the
+// last inserted pane.
 func newWMWithPanes(t *testing.T, n int) (*WindowManager, []*pane.Pane) {
 	t.Helper()
 	wm := NewWindowManager()
@@ -23,6 +27,9 @@ func newWMWithPanes(t *testing.T, n int) (*WindowManager, []*pane.Pane) {
 	return wm, panes
 }
 
+// TestSplitCurrentBuildsTree verifies that repeated horizontal splits build a
+// container root with the right pane count, that the newest pane takes focus,
+// and that PaneIndex matches traversal order.
 func TestSplitCurrentBuildsTree(t *testing.T) {
 	wm, panes := newWMWithPanes(t, 3)
 	if got := wm.PaneCount(); got != 3 {
@@ -39,6 +46,8 @@ func TestSplitCurrentBuildsTree(t *testing.T) {
 	}
 }
 
+// TestCloseCurrentRefocusesSibling verifies that closing a non-edge pane
+// removes it and refocuses its next sibling, without quitting the app.
 func TestCloseCurrentRefocusesSibling(t *testing.T) {
 	wm, panes := newWMWithPanes(t, 3)
 	wm.FocusPane(panes[0])
@@ -53,6 +62,8 @@ func TestCloseCurrentRefocusesSibling(t *testing.T) {
 	}
 }
 
+// TestCloseLastPaneQuits verifies that closing the only remaining pane clears
+// the tree and reports quit=true.
 func TestCloseLastPaneQuits(t *testing.T) {
 	wm, _ := newWMWithPanes(t, 1)
 	if !wm.CloseCurrentPane() {
@@ -63,6 +74,8 @@ func TestCloseLastPaneQuits(t *testing.T) {
 	}
 }
 
+// TestCloseDeadPanes verifies auto-close: dead panes are removed and focus
+// moves to the next sibling, and closing the final dead pane signals quit.
 func TestCloseDeadPanes(t *testing.T) {
 	wm, panes := newWMWithPanes(t, 3)
 
@@ -90,6 +103,8 @@ func TestCloseDeadPanes(t *testing.T) {
 	}
 }
 
+// TestCloseDeadPanesNoDead verifies CloseDeadPanes is a no-op (and never quits)
+// when every pane is alive.
 func TestCloseDeadPanesNoDead(t *testing.T) {
 	wm, _ := newWMWithPanes(t, 2)
 	if wm.CloseDeadPanes() {
@@ -97,6 +112,8 @@ func TestCloseDeadPanesNoDead(t *testing.T) {
 	}
 }
 
+// TestSwapNext verifies SwapNext swaps the focused pane with its next sibling
+// (the first pane of the tree changes accordingly).
 func TestSwapNext(t *testing.T) {
 	wm, panes := newWMWithPanes(t, 3)
 	wm.FocusPane(panes[0])
@@ -106,6 +123,8 @@ func TestSwapNext(t *testing.T) {
 	}
 }
 
+// TestMoveFocusDirectional verifies MoveFocus steps focus to the next/previous
+// sibling in the given split direction and clamps at the edges.
 func TestMoveFocusDirectional(t *testing.T) {
 	wm, panes := newWMWithPanes(t, 3)
 	wm.FocusPane(panes[0])
