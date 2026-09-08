@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/nsf/termbox-go"
+	"github.com/gdamore/tcell/v2"
 
 	"github.com/atharva-0123-cs/tview-demo/pane"
 )
@@ -69,7 +69,7 @@ func (n *LayoutNode) ReplaceChild(oldChild, newChild *LayoutNode) {
 	}
 }
 
-// WindowManager manages the tree of panes and positions them on the termbox buffer.
+// WindowManager manages the tree of panes and positions them on the screen.
 type WindowManager struct {
 	root      *LayoutNode
 	focused   *pane.Pane
@@ -147,8 +147,8 @@ func (wm *WindowManager) findLeaf(p *pane.Pane) *LayoutNode {
 	return found
 }
 
-// Draw lays out and draws all panes and the status bar into termbox.
-func (wm *WindowManager) Draw(width, height int, prefixActive, resizeMode bool, errorMsg string) {
+// Draw lays out and draws all panes and the status bar into the screen.
+func (wm *WindowManager) Draw(screen tcell.Screen, width, height int, prefixActive, resizeMode bool, errorMsg string) {
 	if width <= 0 || height <= 0 {
 		return
 	}
@@ -161,8 +161,8 @@ func (wm *WindowManager) Draw(width, height int, prefixActive, resizeMode bool, 
 	}
 
 	if wm.root == nil {
-		wm.renderStatus(width, height, prefixActive, resizeMode, errorMsg)
-		termbox.HideCursor()
+		wm.renderStatus(screen, width, height, prefixActive, resizeMode, errorMsg)
+		screen.HideCursor()
 		return
 	}
 
@@ -176,30 +176,30 @@ func (wm *WindowManager) Draw(width, height int, prefixActive, resizeMode bool, 
 
 	if wm.zoomed != nil {
 		isFocused := (wm.zoomed == wm.focused)
-		cx, cy, hasCursor := wm.zoomed.Draw(0, 0, width, paneRegionH, isFocused)
+		cx, cy, hasCursor := wm.zoomed.Draw(0, 0, width, paneRegionH, isFocused, screen)
 		if isFocused && hasCursor {
 			cursorX, cursorY = cx, cy
 			cursorVisible = true
 		}
 	} else {
-		cx, cy, hasCursor := wm.distribute(wm.root, 0, 0, width, paneRegionH)
+		cx, cy, hasCursor := wm.distribute(wm.root, 0, 0, width, paneRegionH, screen)
 		if hasCursor {
 			cursorX, cursorY = cx, cy
 			cursorVisible = true
 		}
 	}
 
-	wm.renderStatus(width, height, prefixActive, resizeMode, errorMsg)
+	wm.renderStatus(screen, width, height, prefixActive, resizeMode, errorMsg)
 
 	if cursorVisible {
-		termbox.SetCursor(cursorX, cursorY)
+		screen.ShowCursor(cursorX, cursorY)
 	} else {
-		termbox.HideCursor()
+		screen.HideCursor()
 	}
 }
 
 // distribute recursively assigns rectangles to the nodes of the tree.
-func (wm *WindowManager) distribute(n *LayoutNode, x0, y0, x1, y1 int) (cursorX, cursorY int, hasCursor bool) {
+func (wm *WindowManager) distribute(n *LayoutNode, x0, y0, x1, y1 int, screen tcell.Screen) (cursorX, cursorY int, hasCursor bool) {
 	if n == nil {
 		return 0, 0, false
 	}
@@ -208,7 +208,7 @@ func (wm *WindowManager) distribute(n *LayoutNode, x0, y0, x1, y1 int) (cursorX,
 			return 0, 0, false
 		}
 		isFocused := (n.Pane == wm.focused)
-		cx, cy, hc := n.Pane.Draw(x0, y0, x1, y1, isFocused)
+		cx, cy, hc := n.Pane.Draw(x0, y0, x1, y1, isFocused, screen)
 		if isFocused && hc {
 			return cx, cy, true
 		}
@@ -233,7 +233,7 @@ func (wm *WindowManager) distribute(n *LayoutNode, x0, y0, x1, y1 int) (cursorX,
 				cy1 = y1
 			}
 			if cy1 > cursor {
-				cx, cy, hc := wm.distribute(child, x0, cursor, x1, cy1)
+				cx, cy, hc := wm.distribute(child, x0, cursor, x1, cy1, screen)
 				if hc {
 					cursorX, cursorY, hasCursor = cx, cy, true
 				}
@@ -250,7 +250,7 @@ func (wm *WindowManager) distribute(n *LayoutNode, x0, y0, x1, y1 int) (cursorX,
 				cx1 = x1
 			}
 			if cx1 > cursor {
-				cx, cy, hc := wm.distribute(child, cursor, y0, cx1, y1)
+				cx, cy, hc := wm.distribute(child, cursor, y0, cx1, y1, screen)
 				if hc {
 					cursorX, cursorY, hasCursor = cx, cy, true
 				}
@@ -265,14 +265,14 @@ func (wm *WindowManager) distribute(n *LayoutNode, x0, y0, x1, y1 int) (cursorX,
 // background with light text; the bar turns yellow while a prefix/resize mode
 // is active and red to surface an error.
 const (
-	statusBg  = termbox.Attribute(236) // palette 235
-	statusFg  = termbox.Attribute(253) // palette 252
-	statusHi  = termbox.Attribute(227) // palette 226: bright yellow
-	statusErr = termbox.Attribute(197) // palette 196: red
+	statusBg  = tcell.Color(235) | tcell.ColorValid
+	statusFg  = tcell.Color(252) | tcell.ColorValid
+	statusHi  = tcell.Color(226) | tcell.ColorValid // bright yellow
+	statusErr = tcell.Color(196) | tcell.ColorValid // red
 )
 
 // renderStatus draws the status line at the bottom of the screen.
-func (wm *WindowManager) renderStatus(maxX, maxY int, prefixActive, resizeMode bool, errorMsg string) {
+func (wm *WindowManager) renderStatus(screen tcell.Screen, maxX, maxY int, prefixActive, resizeMode bool, errorMsg string) {
 	y := maxY - 1
 	left := " ROGE "
 	if errorMsg != "" {
@@ -301,26 +301,31 @@ func (wm *WindowManager) renderStatus(maxX, maxY int, prefixActive, resizeMode b
 	fg := statusFg
 	bg := statusBg
 	if errorMsg != "" {
-		fg = statusErr | termbox.AttrBold
+		fg = statusErr
 	} else if prefixActive || resizeMode {
-		fg = statusHi | termbox.AttrBold
+		fg = statusHi
+	}
+
+	st := tcell.StyleDefault.Foreground(fg).Background(bg)
+	if errorMsg != "" || prefixActive || resizeMode {
+		st = st.Bold(true)
 	}
 
 	runesLeft := []rune(left)
 	runesRight := []rune(right)
 
 	for x := 0; x < maxX; x++ {
-		termbox.SetCell(x, y, ' ', fg, bg)
+		screen.SetContent(x, y, ' ', nil, st)
 	}
 
 	for x := 0; x < len(runesLeft) && x < maxX; x++ {
-		termbox.SetCell(x, y, runesLeft[x], fg, bg)
+		screen.SetContent(x, y, runesLeft[x], nil, st)
 	}
 
 	rightStart := maxX - len(runesRight)
 	if rightStart > len(runesLeft) {
 		for i, r := range runesRight {
-			termbox.SetCell(rightStart+i, y, r, fg, bg)
+			screen.SetContent(rightStart+i, y, r, nil, st)
 		}
 	}
 }

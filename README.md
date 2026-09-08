@@ -2,14 +2,14 @@
 
 A terminal multiplexer written in Go. Each pane runs a real shell in a PTY
 (`creack/pty`), and a small VT100/xterm-compatible emulator decodes the shell's
-output into a cell grid that is drawn straight into the termbox-go cell buffer.
+output into a cell grid that is drawn straight into the tcell screen buffer.
 
 ## Features
 
 - Horizontal (`Ctrl+A c`) and vertical (`Ctrl+A C`) splits in a nested layout tree
 - Vim-style focus movement, zoom, rotate, swap, and proportional resize
 - Per-pane VT emulator: fullscreen apps (vim, htop, less), alternate screen,
-  scroll regions, DEC special graphics, 256-color + truecolor mapping,
+  scroll regions, DEC special graphics, 256-color + truecolor passthrough,
   double-width (CJK) characters
 - Panes close automatically when their shell exits (last pane quits the app)
 - Scrollback + `CopyText` plumbing for yank/copy support
@@ -48,13 +48,13 @@ Prefix: `Ctrl+A`, then:
 ## Layout
 
 ```
-main.go     entrypoint, termbox init, event loop, prefix/resize state
+main.go     entrypoint, tcell init, event loop, prefix/resize state, paste gating
 pane/       Pane (PTY + emulator), VT decoder, clipboard helpers
 layout/     WindowManager: layout tree, focus, splits, drawing
 ```
 
-See `DOCS.md` for the detailed control flow and concurrency model (the termbox
-cell buffer may only be touched from the main goroutine).
+See `DOCS.md` for the detailed control flow and concurrency model (the tcell
+screen buffer may only be touched from the main goroutine).
 
 ## Testing
 

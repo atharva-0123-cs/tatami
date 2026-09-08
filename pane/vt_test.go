@@ -145,12 +145,41 @@ func TestScrollbackAndAllText(t *testing.T) {
 func TestSGRColors(t *testing.T) {
 	term := newTestTerm()
 	feed(t, term, "\x1b[38;5;196mX")
-	if c := *term.at(0, 0); c.fg != 196 || c.ch != 'X' {
-		t.Fatalf("cell = %+v, want fg 196 ch X", c)
+	if c := *term.at(0, 0); c.fg.idx != 196 || c.ch != 'X' {
+		t.Fatalf("cell = %+v, want fg idx 196 ch X", c)
 	}
 	feed(t, term, "\x1b[0mY")
-	if c := *term.at(1, 0); c.fg != vtDefaultColor || c.ch != 'Y' {
-		t.Fatalf("cell = %+v, want default reset", c)
+	if c := *term.at(1, 0); !c.fg.def || c.ch != 'Y' {
+		t.Fatalf("cell = %+v, want default fg reset", c)
+	}
+}
+
+func TestSGRTruecolor(t *testing.T) {
+	term := newTestTerm()
+	feed(t, term, "\x1b[38;2;255;0;128mX")
+	c := *term.at(0, 0)
+	if c.fg.rgb != true || c.fg.r != 255 || c.fg.g != 0 || c.fg.b != 128 {
+		t.Fatalf("fg = %+v, want truecolor 255;0;128", c.fg)
+	}
+	feed(t, term, "\x1b[48;2;1;2;3mY")
+	c = *term.at(1, 0)
+	if c.bg.rgb != true || c.bg.r != 1 || c.bg.g != 2 || c.bg.b != 3 {
+		t.Fatalf("bg = %+v, want truecolor 1;2;3", c.bg)
+	}
+}
+
+func TestBracketedPasteMode(t *testing.T) {
+	term := newTestTerm()
+	if term.bracketedPaste {
+		t.Fatal("bracketed paste should default to off")
+	}
+	feed(t, term, "\x1b[?2004h")
+	if !term.bracketedPaste {
+		t.Fatal("bracketed paste should be on after CSI ?2004 h")
+	}
+	feed(t, term, "\x1b[?2004l")
+	if term.bracketedPaste {
+		t.Fatal("bracketed paste should be off after CSI ?2004 l")
 	}
 }
 

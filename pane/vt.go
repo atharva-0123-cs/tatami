@@ -1,11 +1,11 @@
 // Package pane emulates a terminal per pane.
 //
 // terminal is a small VT100/xterm-compatible screen emulator. It exists
-// because raw termbox only draws cells: every control sequence (cursor
+// because the UI only draws cells: every control sequence (cursor
 // addressing, erase, scroll regions, alternate screen, ...) would otherwise
 // leak into the pane as garbage text, and fullscreen programs (vim, htop,
 // less) could never work. The emulator keeps the authoritative screen state;
-// each Pane.Draw pass copies its grid straight into the termbox cell buffer.
+// each Pane.Draw pass copies its grid into the screen buffer.
 package pane
 
 import (
@@ -16,13 +16,30 @@ import (
 	"github.com/mattn/go-runewidth"
 )
 
-// vtDefaultColor marks "use the terminal default" for a cell color.
-const vtDefaultColor = -1
+// vtColor is a cell color: either the terminal default, an xterm palette
+// index, or an explicit 24-bit RGB triple (truecolor SGR 38;2/48;2).
+type vtColor struct {
+	def bool
+	rgb bool
+	r   int
+	g   int
+	b   int
+	idx int // palette index 0-255
+}
+
+// colorDefault returns the "unset/terminal default" color.
+func colorDefault() vtColor { return vtColor{def: true} }
+
+// colorIndex returns a palette color (xterm 256, index 0-255).
+func colorIndex(n int) vtColor { return vtColor{idx: n} }
+
+// colorRGB returns a truecolor value (SGR 38;2 / 48;2).
+func colorRGB(r, g, b int) vtColor { return vtColor{rgb: true, r: r, g: g, b: b} }
 
 // vtCell is one screen cell.
 type vtCell struct {
 	ch        rune
-	fg, bg    int
+	fg, bg    vtColor
 	bold      bool
 	underline bool
 	reverse   bool
@@ -30,7 +47,7 @@ type vtCell struct {
 }
 
 // blankCell returns the default empty cell (space, default colors).
-func blankCell() vtCell { return vtCell{ch: ' ', fg: vtDefaultColor, bg: vtDefaultColor} }
+func blankCell() vtCell { return vtCell{ch: ' ', fg: colorDefault(), bg: colorDefault()} }
 
 // blankLine returns a row of blank cells of the given width.
 func blankLine(cols int) []vtCell {
@@ -51,7 +68,7 @@ type terminal struct {
 	sx, sy     int // saved cursor (ESC 7 / CSI s) in the active buffer
 	msx, msy   int // main-buffer cursor stashed while alt screen is active
 
-	fg, bg               int
+	fg, bg               vtColor
 	bold, underline, rev bool
 
 	top, bot int // scroll region, 0-based inclusive
@@ -60,6 +77,9 @@ type terminal struct {
 	// cursorVisible tracks DECTCEM (CSI ?25 h/l); when hidden the cursor is
 	// not drawn even in a focused pane.
 	cursorVisible bool
+	// bracketedPaste tracks DECSET 2004 (CSI ?2004 h/l): when the shell
+	// enables it, pasted input must be wrapped in ESC[200~ / ESC[201~.
+	bracketedPaste bool
 
 	g0, g1   int  // charsets: 0 = ASCII (B), 1 = DEC special (0)
 	gShifted bool // set by SO, cleared by SI
@@ -86,8 +106,8 @@ func newTerminal(cols, rows int, respond func([]byte)) *terminal {
 		cols:          cols,
 		rows:          rows,
 		grid:          make([]vtCell, cols*rows),
-		fg:            vtDefaultColor,
-		bg:            vtDefaultColor,
+		fg:            colorDefault(),
+		bg:            colorDefault(),
 		top:           0,
 		bot:           rows - 1,
 		wrap:          true,
@@ -151,10 +171,11 @@ func (t *terminal) reset() {
 	}
 	t.alt, t.altOn = nil, false
 	t.x, t.y, t.sx, t.sy, t.msx, t.msy = 0, 0, 0, 0, 0, 0
-	t.fg, t.bg = vtDefaultColor, vtDefaultColor
+	t.fg, t.bg = colorDefault(), colorDefault()
 	t.bold, t.underline, t.rev = false, false, false
 	t.top, t.bot = 0, t.rows-1
 	t.wrap, t.decckm, t.cursorVisible = true, false, true
+	t.bracketedPaste = false
 	t.g0, t.g1, t.gShifted = 0, 0, false
 	t.resetTabs()
 }
@@ -610,7 +631,7 @@ func pn(nums []int, i, def int) int {
 // sgr applies Select Graphic Rendition attributes.
 func (t *terminal) sgr(nums []int) {
 	if len(nums) == 0 {
-		t.fg, t.bg = vtDefaultColor, vtDefaultColor
+		t.fg, t.bg = colorDefault(), colorDefault()
 		t.bold, t.underline, t.rev = false, false, false
 		return
 	}
@@ -621,7 +642,7 @@ func (t *terminal) sgr(nums []int) {
 		}
 		switch {
 		case n == 0:
-			t.fg, t.bg = vtDefaultColor, vtDefaultColor
+			t.fg, t.bg = colorDefault(), colorDefault()
 			t.bold, t.underline, t.rev = false, false, false
 		case n == 1:
 			t.bold = true
@@ -636,17 +657,17 @@ func (t *terminal) sgr(nums []int) {
 		case n == 27:
 			t.rev = false
 		case n >= 30 && n <= 37:
-			t.fg = n - 30
+			t.fg = colorIndex(n - 30)
 		case n == 39:
-			t.fg = vtDefaultColor
+			t.fg = colorDefault()
 		case n >= 40 && n <= 47:
-			t.bg = n - 40
+			t.bg = colorIndex(n - 40)
 		case n == 49:
-			t.bg = vtDefaultColor
+			t.bg = colorDefault()
 		case n >= 90 && n <= 97:
-			t.fg = n - 90 + 8
+			t.fg = colorIndex(n - 90 + 8)
 		case n >= 100 && n <= 107:
-			t.bg = n - 100 + 8
+			t.bg = colorIndex(n - 100 + 8)
 		case n == 38 || n == 48:
 			isFg := n == 38
 			if i+1 >= len(nums) {
@@ -656,9 +677,9 @@ func (t *terminal) sgr(nums []int) {
 			case 5:
 				if i+2 < len(nums) && nums[i+2] >= 0 && nums[i+2] <= 255 {
 					if isFg {
-						t.fg = nums[i+2]
+						t.fg = colorIndex(nums[i+2])
 					} else {
-						t.bg = nums[i+2]
+						t.bg = colorIndex(nums[i+2])
 					}
 					i += 2
 				} else {
@@ -666,11 +687,10 @@ func (t *terminal) sgr(nums []int) {
 				}
 			case 2:
 				if i+4 < len(nums) {
-					c := rgbTo256(nums[i+2], nums[i+3], nums[i+4])
 					if isFg {
-						t.fg = c
+						t.fg = colorRGB(nums[i+2], nums[i+3], nums[i+4])
 					} else {
-						t.bg = c
+						t.bg = colorRGB(nums[i+2], nums[i+3], nums[i+4])
 					}
 				}
 				i += 4
@@ -709,9 +729,10 @@ func (t *terminal) setMode(priv string, nums []int, on bool) {
 			} else {
 				t.exitAlt()
 			}
+		case 2004:
+			t.bracketedPaste = on
 		default:
-			// 25 (cursor), 1000/1002/1006/1015/1016 (mouse),
-			// 1004 (focus), 2004 (bracketed paste), ...: ignore.
+			// 1000/1002/1006/1015/1016 (mouse), 1004 (focus), ...: ignore.
 		}
 	}
 }
@@ -924,30 +945,6 @@ func (t *terminal) dump() string {
 }
 
 // ------------------------------------------------------------- helpers -----
-
-// rgbTo256 approximates a truecolor triple to the xterm 256 palette.
-func rgbTo256(r, g, b int) int {
-	cl := func(v int) int {
-		if v < 0 {
-			return 0
-		}
-		if v > 255 {
-			return 255
-		}
-		return v
-	}
-	r, g, b = cl(r), cl(g), cl(b)
-	if r == g && g == b {
-		if r < 8 {
-			return 16
-		}
-		if r > 248 {
-			return 231
-		}
-		return 232 + (r-8)*24/241
-	}
-	return 16 + (r*6/256)*36 + (g*6/256)*6 + (b * 6 / 256)
-}
 
 // consumeVTOSC consumes "ESC ] ... (BEL | ESC \)".
 func consumeVTOSC(buf []byte) int {

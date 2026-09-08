@@ -10,14 +10,18 @@ import (
 	"time"
 
 	"github.com/creack/pty"
-	"github.com/nsf/termbox-go"
+	"github.com/gdamore/tcell/v2"
 )
 
-// Dark-theme border colors: xterm 256 palette index + 1 (termbox attribute).
+// Dark-theme border colors: xterm 256 palette indices.
 const (
-	colBorder      = termbox.Attribute(240) // palette 239: dim gray
-	colBorderFocus = termbox.Attribute(52)  // palette 51: bright cyan
+	colBorder      = tcell.Color(239) | tcell.ColorValid // dim gray
+	colBorderFocus = tcell.Color(51) | tcell.ColorValid  // bright cyan
 )
+
+// Interrupt wakes the UI event loop (screen.PollEvent). It is safe to call
+// from any goroutine. The application installs a handler during startup.
+var Interrupt = func() {}
 
 // Pane wraps a PTY running a shell and a terminal emulator, acting as a single
 // panel in the multiplexer.
@@ -153,12 +157,13 @@ func (p *Pane) MarkDead(msg string) {
 // setDead marks the pane as terminated and flags it on the border.
 func (p *Pane) setDead(msg string) {
 	p.MarkDead(msg)
-	termbox.Interrupt()
+	Interrupt()
 }
 
-// Draw renders the border and terminal cells onto termbox within [x0, y0, x1, y1).
-// Returns the absolute cursor coordinates and whether the cursor is visible.
-func (p *Pane) Draw(x0, y0, x1, y1 int, isFocused bool) (cx, cy int, hasCursor bool) {
+// Draw renders the border and terminal cells onto the screen within
+// [x0, y0, x1, y1). Returns the absolute cursor coordinates and whether the
+// cursor is visible.
+func (p *Pane) Draw(x0, y0, x1, y1 int, isFocused bool, screen tcell.Screen) (cx, cy int, hasCursor bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -186,27 +191,27 @@ func (p *Pane) Draw(x0, y0, x1, y1 int, isFocused bool) (cx, cy int, hasCursor b
 		p.ptyMtx.Unlock()
 	}
 
-	borderAttr := colBorder
+	borderStyle := tcell.StyleDefault.Foreground(colBorder)
 	if isFocused {
-		borderAttr = colBorderFocus | termbox.AttrBold
+		borderStyle = tcell.StyleDefault.Foreground(colBorderFocus).Bold(true)
 	}
 
 	// Draw corners
-	termbox.SetCell(x0, y0, '┌', borderAttr, termbox.ColorDefault)
-	termbox.SetCell(x1-1, y0, '┐', borderAttr, termbox.ColorDefault)
-	termbox.SetCell(x0, y1-1, '└', borderAttr, termbox.ColorDefault)
-	termbox.SetCell(x1-1, y1-1, '┘', borderAttr, termbox.ColorDefault)
+	screen.SetContent(x0, y0, '┌', nil, borderStyle)
+	screen.SetContent(x1-1, y0, '┐', nil, borderStyle)
+	screen.SetContent(x0, y1-1, '└', nil, borderStyle)
+	screen.SetContent(x1-1, y1-1, '┘', nil, borderStyle)
 
 	// Top and bottom borders
 	for x := x0 + 1; x < x1-1; x++ {
-		termbox.SetCell(x, y0, '─', borderAttr, termbox.ColorDefault)
-		termbox.SetCell(x, y1-1, '─', borderAttr, termbox.ColorDefault)
+		screen.SetContent(x, y0, '─', nil, borderStyle)
+		screen.SetContent(x, y1-1, '─', nil, borderStyle)
 	}
 
 	// Left and right borders
 	for y := y0 + 1; y < y1-1; y++ {
-		termbox.SetCell(x0, y, '│', borderAttr, termbox.ColorDefault)
-		termbox.SetCell(x1-1, y, '│', borderAttr, termbox.ColorDefault)
+		screen.SetContent(x0, y, '│', nil, borderStyle)
+		screen.SetContent(x1-1, y, '│', nil, borderStyle)
 	}
 
 	if p.dead {
@@ -214,10 +219,10 @@ func (p *Pane) Draw(x0, y0, x1, y1 int, isFocused bool) (cx, cy int, hasCursor b
 		if p.exitMsg != "" {
 			title = fmt.Sprintf(" %s ", p.exitMsg)
 		}
-		titleRunes := []rune(title)
-		for i, r := range titleRunes {
+		deadStyle := tcell.StyleDefault.Foreground(tcell.PaletteColor(1)).Bold(true)
+		for i, r := range []rune(title) {
 			if x0+2+i < x1-1 {
-				termbox.SetCell(x0+2+i, y0, r, termbox.ColorRed|termbox.AttrBold, termbox.ColorDefault)
+				screen.SetContent(x0+2+i, y0, r, nil, deadStyle)
 			}
 		}
 	}
@@ -231,12 +236,11 @@ func (p *Pane) Draw(x0, y0, x1, y1 int, isFocused bool) (cx, cy int, hasCursor b
 			if c.wide {
 				continue // right half of a double-width rune drawn at x-1
 			}
-			fg, bg := cellToTermbox(c)
 			ch := c.ch
 			if ch == 0 {
 				ch = ' '
 			}
-			termbox.SetCell(innerX+x, innerY+y, ch, fg, bg)
+			screen.SetContent(innerX+x, innerY+y, ch, nil, cellToStyle(c))
 		}
 	}
 
@@ -251,33 +255,40 @@ func (p *Pane) Draw(x0, y0, x1, y1 int, isFocused bool) (cx, cy int, hasCursor b
 	return cx, cy, hasCursor
 }
 
-// cellToTermbox maps an emulator cell to termbox attributes: default colors map
-// to ColorDefault, reverse video swaps fg/bg, and bold/underline become attr bits.
-func cellToTermbox(c vtCell) (fg, bg termbox.Attribute) {
+// cellToStyle maps an emulator cell to a tcell style. Reverse video swaps
+// fg/bg, default colors map to ColorDefault, palette cells carry their index,
+// and truecolor cells carry their original RGB components; bold and underline
+// become style attributes.
+func cellToStyle(c vtCell) tcell.Style {
 	if c.reverse {
 		c.fg, c.bg = c.bg, c.fg
 	}
-	if c.fg == vtDefaultColor {
-		fg = termbox.ColorDefault
+	st := tcell.StyleDefault
+	if c.fg.def {
+		st = st.Foreground(tcell.ColorDefault)
+	} else if c.fg.rgb {
+		st = st.Foreground(tcell.NewRGBColor(int32(c.fg.r), int32(c.fg.g), int32(c.fg.b)))
 	} else {
-		fg = termbox.Attribute(c.fg + 1)
+		st = st.Foreground(tcell.PaletteColor(c.fg.idx))
 	}
-	if c.bg == vtDefaultColor {
-		bg = termbox.ColorDefault
+	if c.bg.def {
+		st = st.Background(tcell.ColorDefault)
+	} else if c.bg.rgb {
+		st = st.Background(tcell.NewRGBColor(int32(c.bg.r), int32(c.bg.g), int32(c.bg.b)))
 	} else {
-		bg = termbox.Attribute(c.bg + 1)
+		st = st.Background(tcell.PaletteColor(c.bg.idx))
 	}
 	if c.bold {
-		fg |= termbox.AttrBold
+		st = st.Bold(true)
 	}
 	if c.underline {
-		fg |= termbox.AttrUnderline
+		st = st.Underline(true)
 	}
-	return fg, bg
+	return st
 }
 
-// HandleEvent forwards a termbox key event to the PTY. Returns true if key data was sent.
-func (p *Pane) HandleEvent(ev termbox.Event) bool {
+// HandleEvent forwards a tcell key event to the PTY. Returns true if key data was sent.
+func (p *Pane) HandleEvent(ev *tcell.EventKey) bool {
 	data := p.KeyToBytes(ev)
 	if len(data) > 0 {
 		if _, err := p.WriteInput(data); err != nil {
@@ -317,25 +328,35 @@ func (p *Pane) CopyText() (string, error) {
 	return fmt.Sprintf("copied %d lines via %s", lines, tool), nil
 }
 
-// KeyToBytes converts a termbox event into the byte sequence expected by a terminal.
-func (p *Pane) KeyToBytes(ev termbox.Event) []byte {
+// Paste reports whether the pane's shell has enabled bracketed paste
+// (DECSET 2004), so the UI should wrap pasted input in ESC[200~/ESC[201~.
+func (p *Pane) Paste() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.term != nil && p.term.bracketedPaste
+}
+
+// KeyToBytes converts a tcell event into the byte sequence expected by a terminal.
+func (p *Pane) KeyToBytes(ev *tcell.EventKey) []byte {
 	return KeyToBytes(ev, p.AppCursorKeys())
 }
 
-// KeyToBytes converts a termbox event into bytes.
-func KeyToBytes(ev termbox.Event, appCursor bool) []byte {
-	if ev.Type != termbox.EventKey {
+// KeyToBytes converts a tcell event into bytes.
+func KeyToBytes(ev *tcell.EventKey, appCursor bool) []byte {
+	if ev == nil {
 		return nil
 	}
 
-	// Printable characters first: termbox reports a plain character with
-	// Key == 0, which collides with KeyCtrlSpace (also 0). Checking Ch
-	// before the key-code switch keeps letters from being sent as NUL.
-	if ev.Ch != 0 {
-		if ev.Mod&termbox.ModAlt != 0 {
-			return []byte{0x1b, byte(ev.Ch)}
+	// Plain printable characters come through as KeyRune with the rune set.
+	if ev.Key() == tcell.KeyRune {
+		r := ev.Rune()
+		if r == 0 {
+			return nil
 		}
-		return []byte(string(ev.Ch))
+		if ev.Modifiers()&tcell.ModAlt != 0 {
+			return []byte{0x1b, byte(r)}
+		}
+		return []byte(string(r))
 	}
 
 	arrow := func(csi, ss3 byte) []byte {
@@ -345,125 +366,80 @@ func KeyToBytes(ev termbox.Event, appCursor bool) []byte {
 		return []byte{0x1b, '[', csi}
 	}
 
-	switch ev.Key {
-	case termbox.KeyEnter:
+	switch ev.Key() {
+	case tcell.KeyEnter:
 		return []byte{'\r'}
-	case termbox.KeyBackspace:
+	case tcell.KeyBackspace:
 		return []byte{0x7f}
-	case termbox.KeyBackspace2:
-		return []byte{0x08}
-	case termbox.KeyTab:
+	case tcell.KeyTab:
 		return []byte{'\t'}
-	case termbox.KeyEsc:
+	case tcell.KeyEsc:
 		return []byte{0x1b}
-	case termbox.KeySpace:
-		return []byte{' '}
-	case termbox.KeyArrowUp:
+	case tcell.KeyUp:
 		return arrow('A', 'A')
-	case termbox.KeyArrowDown:
+	case tcell.KeyDown:
 		return arrow('B', 'B')
-	case termbox.KeyArrowRight:
+	case tcell.KeyRight:
 		return arrow('C', 'C')
-	case termbox.KeyArrowLeft:
+	case tcell.KeyLeft:
 		return arrow('D', 'D')
-	case termbox.KeyHome:
+	case tcell.KeyHome:
 		if appCursor {
 			return []byte{0x1b, 'O', 'H'}
 		}
 		return []byte("\x1b[H")
-	case termbox.KeyEnd:
+	case tcell.KeyEnd:
 		if appCursor {
 			return []byte{0x1b, 'O', 'F'}
 		}
 		return []byte("\x1b[F")
-	case termbox.KeyPgup:
+	case tcell.KeyPgUp:
 		return []byte("\x1b[5~")
-	case termbox.KeyPgdn:
+	case tcell.KeyPgDn:
 		return []byte("\x1b[6~")
-	case termbox.KeyDelete:
+	case tcell.KeyDelete:
 		return []byte("\x1b[3~")
-	case termbox.KeyInsert:
+	case tcell.KeyInsert:
 		return []byte("\x1b[2~")
-	case termbox.KeyF1:
+	case tcell.KeyF1:
 		return []byte("\x1bOP")
-	case termbox.KeyF2:
+	case tcell.KeyF2:
 		return []byte("\x1bOQ")
-	case termbox.KeyF3:
+	case tcell.KeyF3:
 		return []byte("\x1bOR")
-	case termbox.KeyF4:
+	case tcell.KeyF4:
 		return []byte("\x1bOS")
-	case termbox.KeyF5:
+	case tcell.KeyF5:
 		return []byte("\x1b[15~")
-	case termbox.KeyF6:
+	case tcell.KeyF6:
 		return []byte("\x1b[17~")
-	case termbox.KeyF7:
+	case tcell.KeyF7:
 		return []byte("\x1b[18~")
-	case termbox.KeyF8:
+	case tcell.KeyF8:
 		return []byte("\x1b[19~")
-	case termbox.KeyF9:
+	case tcell.KeyF9:
 		return []byte("\x1b[20~")
-	case termbox.KeyF10:
+	case tcell.KeyF10:
 		return []byte("\x1b[21~")
-	case termbox.KeyF11:
+	case tcell.KeyF11:
 		return []byte("\x1b[23~")
-	case termbox.KeyF12:
+	case tcell.KeyF12:
 		return []byte("\x1b[24~")
-	case termbox.KeyCtrlSpace:
+	case tcell.KeyCtrlSpace:
 		return []byte{0}
-	case termbox.KeyCtrlA:
-		return []byte{1}
-	case termbox.KeyCtrlB:
-		return []byte{2}
-	case termbox.KeyCtrlC:
-		return []byte{3}
-	case termbox.KeyCtrlD:
-		return []byte{4}
-	case termbox.KeyCtrlE:
-		return []byte{5}
-	case termbox.KeyCtrlF:
-		return []byte{6}
-	case termbox.KeyCtrlG:
-		return []byte{7}
-	case termbox.KeyCtrlJ:
-		return []byte{10}
-	case termbox.KeyCtrlK:
-		return []byte{11}
-	case termbox.KeyCtrlL:
-		return []byte{12}
-	case termbox.KeyCtrlN:
-		return []byte{14}
-	case termbox.KeyCtrlO:
-		return []byte{15}
-	case termbox.KeyCtrlP:
-		return []byte{16}
-	case termbox.KeyCtrlQ:
-		return []byte{17}
-	case termbox.KeyCtrlR:
-		return []byte{18}
-	case termbox.KeyCtrlS:
-		return []byte{19}
-	case termbox.KeyCtrlT:
-		return []byte{20}
-	case termbox.KeyCtrlU:
-		return []byte{21}
-	case termbox.KeyCtrlV:
-		return []byte{22}
-	case termbox.KeyCtrlW:
-		return []byte{23}
-	case termbox.KeyCtrlX:
-		return []byte{24}
-	case termbox.KeyCtrlY:
-		return []byte{25}
-	case termbox.KeyCtrlZ:
-		return []byte{26}
-	case termbox.KeyCtrl4:
+	case tcell.KeyCtrlBackslash: // Ctrl-\
 		return []byte{0x1c}
-	case termbox.KeyCtrl5:
+	case tcell.KeyCtrlRightSq: // Ctrl-]
 		return []byte{0x1d}
-	case termbox.KeyCtrl6:
+	case tcell.KeyCtrlCarat: // Ctrl-^
 		return []byte{0x1e}
-	case termbox.KeyCtrl7:
+	case tcell.KeyCtrlUnderscore: // Ctrl-_
 		return []byte{0x1f}
+	}
+
+	// Ctrl+A..Ctrl+Z map to bytes 1..26 (KeyCtrlA == 65).
+	if ev.Key() >= tcell.KeyCtrlA && ev.Key() <= tcell.KeyCtrlZ {
+		return []byte{byte(ev.Key() - tcell.KeyCtrlA + 1)}
 	}
 
 	return nil
@@ -480,7 +456,7 @@ func (p *Pane) WriteInput(data []byte) (int, error) {
 }
 
 // readPtyOutput pumps PTY output into the emulator under the pane mutex and
-// wakes the UI with termbox.Interrupt(). It returns when the PTY read fails.
+// wakes the UI by calling Interrupt(). It returns when the PTY read fails.
 func (p *Pane) readPtyOutput() {
 	buf := make([]byte, 4096)
 	for {
@@ -495,7 +471,7 @@ func (p *Pane) readPtyOutput() {
 				p.term.process(buf[:n])
 			}
 			p.mu.Unlock()
-			termbox.Interrupt()
+			Interrupt()
 		}
 	}
 }

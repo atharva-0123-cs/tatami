@@ -4,40 +4,44 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/nsf/termbox-go"
+	"github.com/gdamore/tcell/v2"
 )
 
 func TestKeyToBytes(t *testing.T) {
 	cases := []struct {
 		name      string
-		ev        termbox.Event
+		ev        *tcell.EventKey
 		appCursor bool
 		want      []byte
 	}{
-		{"letter", termbox.Event{Type: termbox.EventKey, Ch: 'a', Key: 0}, false, []byte("a")},
-		{"space", termbox.Event{Type: termbox.EventKey, Ch: ' '}, false, []byte(" ")},
-		{"enter", termbox.Event{Type: termbox.EventKey, Key: termbox.KeyEnter}, false, []byte("\r")},
-		{"backspace", termbox.Event{Type: termbox.EventKey, Key: termbox.KeyBackspace}, false, []byte{0x7f}},
-		{"backspace2", termbox.Event{Type: termbox.EventKey, Key: termbox.KeyBackspace2}, false, []byte{0x08}},
-		{"tab", termbox.Event{Type: termbox.EventKey, Key: termbox.KeyTab}, false, []byte("\t")},
-		{"esc", termbox.Event{Type: termbox.EventKey, Key: termbox.KeyEsc}, false, []byte{0x1b}},
-		{"ctrl-c", termbox.Event{Type: termbox.EventKey, Key: termbox.KeyCtrlC}, false, []byte{3}},
-		{"ctrl-z", termbox.Event{Type: termbox.EventKey, Key: termbox.KeyCtrlZ}, false, []byte{0x1a}},
-		{"ctrl-space", termbox.Event{Type: termbox.EventKey, Key: termbox.KeyCtrlSpace}, false, []byte{0}},
-		{"arrow-up-normal", termbox.Event{Type: termbox.EventKey, Key: termbox.KeyArrowUp}, false, []byte("\x1b[A")},
-		{"arrow-up-app", termbox.Event{Type: termbox.EventKey, Key: termbox.KeyArrowUp}, true, []byte("\x1bOA")},
-		{"arrow-left-normal", termbox.Event{Type: termbox.EventKey, Key: termbox.KeyArrowLeft}, false, []byte("\x1b[D")},
-		{"arrow-left-app", termbox.Event{Type: termbox.EventKey, Key: termbox.KeyArrowLeft}, true, []byte("\x1bOD")},
-		{"home-normal", termbox.Event{Type: termbox.EventKey, Key: termbox.KeyHome}, false, []byte("\x1b[H")},
-		{"home-app", termbox.Event{Type: termbox.EventKey, Key: termbox.KeyHome}, true, []byte("\x1bOH")},
-		{"pgup", termbox.Event{Type: termbox.EventKey, Key: termbox.KeyPgup}, false, []byte("\x1b[5~")},
-		{"pgdn", termbox.Event{Type: termbox.EventKey, Key: termbox.KeyPgdn}, false, []byte("\x1b[6~")},
-		{"delete", termbox.Event{Type: termbox.EventKey, Key: termbox.KeyDelete}, false, []byte("\x1b[3~")},
-		{"f2", termbox.Event{Type: termbox.EventKey, Key: termbox.KeyF2}, false, []byte("\x1bOQ")},
-		{"f11", termbox.Event{Type: termbox.EventKey, Key: termbox.KeyF11}, false, []byte("\x1b[23~")},
-		{"alt-a", termbox.Event{Type: termbox.EventKey, Ch: 'a', Mod: termbox.ModAlt}, false, []byte{0x1b, 'a'}},
-		{"unknown-key", termbox.Event{Type: termbox.EventKey, Key: termbox.MouseLeft}, false, nil},
-		{"non-key", termbox.Event{Type: termbox.EventResize}, false, nil},
+		{"letter", tcell.NewEventKey(tcell.KeyRune, 'a', 0), false, []byte("a")},
+		{"space", tcell.NewEventKey(tcell.KeyRune, ' ', 0), false, []byte(" ")},
+		{"enter", tcell.NewEventKey(tcell.KeyEnter, 0, 0), false, []byte("\r")},
+		{"backspace", tcell.NewEventKey(tcell.KeyBackspace, 0, 0), false, []byte{0x7f}},
+		{"tab", tcell.NewEventKey(tcell.KeyTab, 0, 0), false, []byte("\t")},
+		{"esc", tcell.NewEventKey(tcell.KeyEsc, 0, 0), false, []byte{0x1b}},
+		{"ctrl-a", tcell.NewEventKey(tcell.KeyCtrlA, 0, 0), false, []byte{1}},
+		{"ctrl-c", tcell.NewEventKey(tcell.KeyCtrlC, 0, 0), false, []byte{3}},
+		{"ctrl-z", tcell.NewEventKey(tcell.KeyCtrlZ, 0, 0), false, []byte{0x1a}},
+		{"ctrl-space", tcell.NewEventKey(tcell.KeyCtrlSpace, 0, 0), false, []byte{0}},
+		{"ctrl-backslash", tcell.NewEventKey(tcell.KeyCtrlBackslash, 0, 0), false, []byte{0x1c}},
+		{"ctrl-rightsq", tcell.NewEventKey(tcell.KeyCtrlRightSq, 0, 0), false, []byte{0x1d}},
+		{"ctrl-carat", tcell.NewEventKey(tcell.KeyCtrlCarat, 0, 0), false, []byte{0x1e}},
+		{"ctrl-underscore", tcell.NewEventKey(tcell.KeyCtrlUnderscore, 0, 0), false, []byte{0x1f}},
+		{"arrow-up-normal", tcell.NewEventKey(tcell.KeyUp, 0, 0), false, []byte("\x1b[A")},
+		{"arrow-up-app", tcell.NewEventKey(tcell.KeyUp, 0, 0), true, []byte("\x1bOA")},
+		{"arrow-left-normal", tcell.NewEventKey(tcell.KeyLeft, 0, 0), false, []byte("\x1b[D")},
+		{"arrow-left-app", tcell.NewEventKey(tcell.KeyLeft, 0, 0), true, []byte("\x1bOD")},
+		{"home-normal", tcell.NewEventKey(tcell.KeyHome, 0, 0), false, []byte("\x1b[H")},
+		{"home-app", tcell.NewEventKey(tcell.KeyHome, 0, 0), true, []byte("\x1bOH")},
+		{"pgup", tcell.NewEventKey(tcell.KeyPgUp, 0, 0), false, []byte("\x1b[5~")},
+		{"pgdn", tcell.NewEventKey(tcell.KeyPgDn, 0, 0), false, []byte("\x1b[6~")},
+		{"delete", tcell.NewEventKey(tcell.KeyDelete, 0, 0), false, []byte("\x1b[3~")},
+		{"f2", tcell.NewEventKey(tcell.KeyF2, 0, 0), false, []byte("\x1bOQ")},
+		{"f11", tcell.NewEventKey(tcell.KeyF11, 0, 0), false, []byte("\x1b[23~")},
+		{"alt-a", tcell.NewEventKey(tcell.KeyRune, 'a', tcell.ModAlt), false, []byte{0x1b, 'a'}},
+		{"unknown-key", tcell.NewEventKey(tcell.KeyNUL, 0, 0), false, nil},
+		{"non-key", nil, false, nil},
 	}
 
 	for _, c := range cases {
