@@ -11,12 +11,13 @@ TUI "roge" terminal multiplexer built with `gdamore/tcell/v2` and `creack/pty`. 
 
 ## Architecture
 
-- `main.go` — entrypoint. Creates + initializes the tcell screen (enables bracketed paste), installs `pane.Interrupt`, owns the Ctrl+A prefix and resize-mode state, and runs the `PollEvent` loop. `handleKey` consumes multiplexer commands; unconsumed keys are forwarded to the focused pane. A `render()` closure clears the screen, calls `wm.Draw`, and calls `screen.Show()` after every event.
-- `pane/pane.go` — `Pane` wraps a `creack/pty` running a shell and a VT emulator (`pane/vt.go`) that buffers decoded escape sequences. One goroutine (`readPtyOutput`) per pane feeds shell output into the emulator under the pane mutex and wakes the main loop via the `pane.Interrupt` hook (which posts an `EventInterrupt`). `Draw` copies the emulator grid into the screen; `KeyToBytes`/`HandleEvent` convert tcell events to the byte sequences the shell expects.
+- `main.go` — entrypoint. Creates + initializes the tcell screen (enables bracketed paste, and mouse when `mouse=on`) and runs the `PollEvent` loop. `keys.go` handles the multiplexer commands (`handleKey`); unconsumed keys are forwarded to the focused pane. Per-loop UI state (prefix/resize/paste modes) lives in `state.go`. A `render()` closure clears the screen, calls `wm.Draw`, and calls `screen.Show()` after every event.
+- `config/` — `roge.conf` loader (`KEY=value`, `#` comments) with `ROGE_<NAME>` env overrides: prefix key, mouse toggle, status-bar colors.
+- `pane/pane.go` — `Pane` type + lifecycle: wraps a `creack/pty` running a shell, owns the emulator, spawns the output-reader and process-wait goroutines. `process.go` selects the shell (`shellCandidates`) and starts it; `output.go` (`readPtyOutput`) feeds shell output into the emulator under the pane mutex and wakes the main loop via the `pane.Interrupt` hook (which posts an `EventInterrupt`); `draw.go` paints the border and emulator grid into the screen; `input.go` converts tcell events to the byte sequences the shell expects (`KeyToBytes`/`HandleEvent`) plus clipboard/paste helpers; `clipboard.go` copies text to the system clipboard.
 - `pane/vt.go` — pure emulator, no UI dependency. Cells store a `vtColor` (default / palette index / truecolor RGB). Tracks DECTCEM cursor visibility, DECCKM app cursor keys, and DECSET 2004 bracketed paste.
-- `layout/layout.go` — `WindowManager` recurses over the `LayoutNode` tree to assign each pane a screen rectangle, calls each pane's `Draw`, and renders the status bar straight into the screen buffer. Focus, zoom, split, resize, swap, and rotate mutate the tree; changes appear on the next `Draw` pass.
+- `layout/layout.go` — `WindowManager` types and tree primitives over the `LayoutNode` tree. `draw.go` recurses to assign each pane a screen rectangle, calls each pane's `Draw`, and renders the status bar; `splits.go` creates panes, `close.go` removes them, `focus.go` moves focus, `transform.go` zooms/swaps/rotates, `resize.go` adjusts proportions. Changes appear on the next `Draw` pass.
 
-## Keybindings (Ctrl+A prefix)
+## Keybindings (default Ctrl+A prefix; configurable via `roge.conf` `prefix =`)
 
 c/-: h-split | C/|: v-split | h/j/k/l: focus | x: close | z: zoom | o: rotate | }/{: swap | r: resize mode (then h/j/k/l) | 1-9: jump to pane | q: quit
 

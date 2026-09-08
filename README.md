@@ -53,9 +53,12 @@ Prefix: `Ctrl+A`, then:
 ## Layout
 
 ```
-main.go     entrypoint, tcell init, event loop, prefix/resize state, paste gating
-pane/       Pane (PTY + emulator), VT decoder, clipboard helpers
-layout/     WindowManager: layout tree, focus, splits, drawing
+main.go     entrypoint, tcell init, event loop
+keys.go     prefix/resize command parser, key forwarding
+state.go    per-loop UI state (prefix/resize/paste modes)
+config/     roge.conf loader + env overrides
+pane/       Pane, PTY + emulator, input/draw/clipboard helpers
+layout/     WindowManager: tree, splits, focus, drawing, resize
 ```
 
 See `DOCS.md` for the detailed control flow and concurrency model (the tcell

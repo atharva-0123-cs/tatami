@@ -106,7 +106,7 @@ Returns `true` when the multiplexer consumes the event, `false` to forward.
 
 ## 3. PTY output → screen
 
-`readPtyOutput` (one goroutine per pane, `pane/readPtyOutput`):
+`readPtyOutput` (one goroutine per pane, `pane/output.go`):
 
 ```
 read(pty) → lock pane mutex → term.process(bytes) → unlock → pane.Interrupt()
