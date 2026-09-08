@@ -44,7 +44,7 @@ func NewPane(label string) (*Pane, error) {
 		log.Printf("Warning: could not get working directory, defaulting to /: %v", err)
 	}
 
-	candidates := []string{"bash", os.Getenv("SHELL"), "zsh", "sh"}
+	candidates := []string{"zsh", os.Getenv("SHELL"), "zsh", "sh"}
 	seen := map[string]bool{}
 	var shells []string
 	for _, s := range candidates {
@@ -474,10 +474,11 @@ func (p *Pane) IsDead() bool {
 	return p.dead
 }
 
-// Close terminates the shell process and closes the PTY.
+// Close terminates the shell process and closes the PTY. For a pane whose
+// process has already exited, only the PTY is closed.
 func (p *Pane) Close() error {
 	log.Printf("Closing pane %s", p.label())
-	if p.cmd != nil && p.cmd.Process != nil {
+	if p.cmd != nil && p.cmd.Process != nil && !p.IsDead() {
 		if err := p.cmd.Process.Signal(os.Interrupt); err != nil {
 			log.Printf("Error sending interrupt to pane %s process: %v", p.label(), err)
 			if err := p.cmd.Process.Kill(); err != nil {

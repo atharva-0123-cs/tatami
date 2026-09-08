@@ -2,12 +2,10 @@ package main
 
 import (
 	"fmt"
+	"github.com/atharva-0123-cs/tview-demo/layout"
+	"github.com/nsf/termbox-go"
 	"log"
 	"os"
-
-	"github.com/nsf/termbox-go"
-
-	"github.com/atharva-0123-cs/tview-demo/layout"
 )
 
 var (
@@ -188,6 +186,13 @@ func main() {
 
 	for !shouldQuit {
 		ev := termbox.PollEvent()
+
+		// Auto-close panes whose shell exited (e.g. `exit`); if the last
+		// pane closed this way, quit the app.
+		if wm.CloseDeadPanes() {
+			shouldQuit = true
+		}
+
 		switch ev.Type {
 		case termbox.EventKey:
 			errorMsg = ""

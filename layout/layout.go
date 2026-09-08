@@ -418,15 +418,51 @@ func (wm *WindowManager) CloseCurrentPane() bool {
 	if wm.root == nil {
 		return false
 	}
-
 	focusedNode := wm.findLeaf(wm.focused)
 	if focusedNode == nil {
 		return false
 	}
+	return wm.closeLeaf(focusedNode)
+}
 
+// CloseDeadPanes removes every pane whose shell process has exited. It returns
+// true if the last pane was closed (the app should quit).
+func (wm *WindowManager) CloseDeadPanes() bool {
+	if wm.root == nil {
+		return false
+	}
+	for _, p := range wm.collectPanes() {
+		if p.IsDead() {
+			if wm.closePane(p) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// closePane removes a specific pane from the layout, returning true if the
+// last pane was closed.
+func (wm *WindowManager) closePane(p *pane.Pane) bool {
+	if wm.root == nil || p == nil {
+		return false
+	}
+	n := wm.findLeaf(p)
+	if n == nil {
+		return false
+	}
+	return wm.closeLeaf(n)
+}
+
+// closeLeaf removes the given leaf node from the layout tree, closes its pane,
+// and re-focuses a neighbor. Returns true if the last pane was closed.
+func (wm *WindowManager) closeLeaf(focusedNode *LayoutNode) bool {
 	p := focusedNode.Pane
 	if err := p.Close(); err != nil {
 		log.Printf("Error closing pane: %v", err)
+	}
+	if wm.zoomed == p {
+		wm.zoomed = nil
 	}
 
 	parent := focusedNode.Parent

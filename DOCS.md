@@ -5,6 +5,49 @@ small VT emulator decodes the shell's output into a cell grid that is drawn
 straight into the termbox-Go cell buffer. There is one OS thread for the UI
 loop and one goroutine per pane reading PTY output.
 
+## Control-flow overview
+
+```text
+main()                          (main goroutine)
+  |
+  v
++-- open roge.log, log.SetOutput(f)
++-- termbox.Init() + termbox.SetOutputMode(termbox.Output256)
++-- layout.NewWindowManager(), then wm.NewPane()
+|     spawn shell (bash/..) under pty.Start, create 80x24 VT emulator;
+|     start one goroutine per pane: readPtyOutput, cmd.Wait
++-- render(): termbox.Clear -> wm.Draw(w,h,prefixActive,resizeMode,err) -> termbox.Flush
+  |
+  v
+PollEvent (blocks until a termbox event; any goroutine may termbox.Interrupt())
+  |
+  v
+CloseDeadPanes()                removes every pane whose shell exited,
+  |                             refocuses a neighbor
+  |
+  +-- was the last pane closed? --yes--> shouldQuit = true
+  |                                  (also set by 'q', or 'x' on the last pane)
+  |                                       |
+  v                                       v
+switch (ev.Type)                 close every pane -> exit
+  |-- EventKey --> handleKey()
+  |      |-- consumed (prefix/resize cmd) --> mutate layout tree
+  |      |       (split/focus/zoom/swap/close/resize/jump)
+  |      +-- forwarded --> FocusedPane().HandleEvent(ev)
+  |                    -> KeyToBytes -> WriteInput(pty)
+  |      --> render()
+  |-- EventResize / EventInterrupt --> render()
+  +-- EventError --> log only, no render
+  v
+(loop back to PollEvent)
+
+background goroutines (one set per pane)
+  readPtyOutput: read(pty) -> lock pane.mu -> term.process(bytes) -> unlock
+      -> termbox.Interrupt()          (wakes the blocked PollEvent above)
+  cmd.Wait: shell exited -> mark pane dead -> termbox.Interrupt()
+      (the dead flag is consumed by CloseDeadPanes() in the main loop)
+```
+
 ## 1. Startup (`main.go`)
 
 1. Open `roge.log`, redirect the process logger to it.
@@ -78,12 +121,16 @@ read(pty) → lock pane mutex → term.process(bytes) → unlock → termbox.Int
 
 ## 5. Shutdown
 
-- Closing the last pane (`x` in prefix mode) sets `shouldQuit`; loop exits.
+- Each loop iteration calls `wm.CloseDeadPanes()`, which removes any pane whose
+  shell exited (e.g. `exit`), re-focusing a neighbor. If the last pane closed
+  this way, `shouldQuit` is set and the loop exits.
+- Closing the last pane with `x` in prefix mode also sets `shouldQuit`.
 - Every pane is closed: `cmd.Process.Signal(os.Interrupt)`, wait up to
-  150 ms on `done`, kill if still alive, then close the PTY.
-- `Cmd.Wait` goroutine marks the pane dead (`setDead` fires an interrupt so
-  the border updates) and closes `done`; `readPtyOutput` unblocks on the PTY
-  error, waits on `done`, and exits.
+  150 ms on `done`, kill if still alive, then close the PTY (a pane whose
+  process already exited only has its PTY closed).
+- `Cmd.Wait` goroutine marks the pane dead (`setDead` fires an interrupt so the
+  main loop can auto-close it) and closes `done`; `readPtyOutput` unblocks on
+  the PTY error, waits on `done`, and exits.
 
 ## 6. Concurrency model
 
