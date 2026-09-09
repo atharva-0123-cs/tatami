@@ -9,39 +9,41 @@ and one goroutine per pane reading PTY output.
 main() [main goroutine]
   |
   +-- 1. open tatami.log, install slog handler (setupLogger: text | json)
-  +-- 2. tcell.NewScreen + screen.Init, screen.EnablePaste()
-  +-- 3. install pane.Interrupt = screen.PostEvent(EventInterrupt)
-  +-- 4. layout.NewWindowManager
-  +-- 5. wm.NewPane(): pty.Start(shell: $SHELL -> bash -> zsh -> sh)
+  +-- 2. config.Load(), re-install logger with the profile
+  +-- 3. app.New(cfg): tcell.NewScreen + screen.Init, EnableMouse (mouse=on)
+  +-- 4. install pane.Interrupt = screen.PostEvent(EventInterrupt)
+  +-- 5. layout.NewWindowManager, wm.NewPane(): pty.Start(shell: $SHELL -> bash -> zsh -> sh)
   +-- 6. spawn per-pane goroutines: readPtyOutput, cmd.Wait
-  +-- 7. render(): screen.Clear -> wm.Draw -> screen.Show
+  +-- 7. defer a.Cleanup(), then a.Run(): render -> PollEvent loop
+  |
+  +-- Cleanup: close every pane -> screen.Fini -> xterm reset sequences
   |
   v
-PollEvent()                     [blocks; woken by pane.Interrupt()]
+a.Run(): PollEvent()                 [blocks; woken by pane.Interrupt()]
   |
   v
 CloseDeadPanes(): remove every pane whose shell exited, refocus a neighbor
   |
-  +-- panes remain? -- no (shouldQuit = true) --> close every pane -> exit
+  +-- panes remain? -- no (shouldQuit = true) --> exit loop -> Cleanup
   |
   v
 switch (ev.Type)
   |
   +-- EventKey [pasteActive]   -> forward verbatim to focused pane (no commands)
-  |      render()
+  |      Render()
   |
   +-- EventKey                 -> handleKey()
   |      |-- consumed          -> mutate layout tree
   |      |                        (split/focus/zoom/swap/close/resize/jump)
   |      +-- forwarded         -> FocusedPane.HandleEvent
   |                               -> KeyToBytes -> write PTY
-  |      render()
+  |      Render()
   |
   +-- EventPaste               -> set/clear pasteActive; send ESC[200~ / 201~
   |                               to the focused pane if it enabled mode 2004
-  |      render()
+  |      Render()
   |
-  +-- EventResize / EventInterrupt -> render()
+  +-- EventResize / EventInterrupt -> Render()
   |
   +-- EventError                    -> log only, no render
   |
@@ -49,27 +51,30 @@ switch (ev.Type)
 (loop back to PollEvent)
 
 background goroutines (one set per pane):
-  readPtyOutput: read -> lock -> process -> unlock -> pane.Interrupt()
+  readPtyOutput: read -> lock -> term.Process -> unlock -> pane.Interrupt()
   cmd.Wait:      shell exited -> mark pane dead -> pane.Interrupt()
 ```
 
-## 1. Startup (`main.go`)
+## 1. Startup (`main.go` + `internal/app.New`)
 
 1. Open `tatami.log`, install the global slog handler via `setupLogger`
    (two-phase: defaults first so config warnings are captured, then the loaded
    profile; `text` renders `[LEVEL] time file:line : message`, `json` is the
-   structured alternative). Every record carries `app`, `version` and a per-run
-   `run` correlation ID.
-2. `tcell.NewScreen()` + `screen.Init()` — requires a real TTY; fails if stdin
-   is not a TTY.
-3. `screen.EnablePaste()` so bracketed-paste sequences become `EventPaste`.
+   structured alternative).
+2. `app.New(cfg)` takes over: `tcell.NewScreen()` + `screen.Init()` — requires
+   a real TTY; fails if stdin is not a TTY.
+3. `screen.EnableMouse(...)` when `mouse = on`.
 4. Install `pane.Interrupt` to post an `EventInterrupt` to the screen queue
    (background goroutines use it to wake the UI loop).
 5. `layout.NewWindowManager()`, then `wm.NewPane()` to create pane 1
    (`pane.NewPane("1")`): spawns a shell (`bash`/`$SHELL`/`zsh`/`sh`, first
-   found) under `pty.Start(...)`, creates the 80×24 emulator, starts
+   found) under `pty.Start(...)`, creates the emulator, starts
    `readPtyOutput` and a `cmd.Wait` goroutine.
-6. First `render()`: `screen.Clear` → `wm.Draw(screen, w, h, prefixActive, resizeMode, errorMsg)` → `screen.Show()`.
+6. `main` defers `a.Cleanup()`, then `a.Run()` drives the loop from here.
+
+All per-loop UI state (prefix/resize/paste/copy modes, scroll offset, error
+message, quit flag) lives on the `App` struct; there are no package globals.
+The tcell screen may only be touched on the main goroutine.
 
 ## 2. Main event loop
 

@@ -1,4 +1,4 @@
-// Package layout implements the WindowManager: a tree of LayoutNodes (each
+// Package layout implements the WindowManager: a tree of window.Nodes (each
 // leaf holds one Pane, each container splits its children in one direction)
 // plus focus, zoom, split, close, swap, rotate and resize operations. Every
 // render pass walks the tree once to assign each pane a screen rectangle,
@@ -7,118 +7,36 @@
 // The implementation is split across files by concern: draw.go renders the
 // layout and status bar, splits.go creates panes, close.go removes them,
 // focus.go moves focus, transform.go zooms/swaps/rotates, and resize.go
-// adjusts proportions. This file holds the tree types and primitives.
+// adjusts proportions. This file holds the WindowManager and its window/state
+// bookkeeping; the tree primitives and workspace save slots live in the
+// window package.
 package layout
 
 import (
 	"fmt"
 
 	"github.com/atharva-0123-cs/tatami/pane"
-)
-
-// SplitDir represents the direction of a split.
-type SplitDir int
-
-const (
-	SplitHorizontal SplitDir = iota // children laid out top-to-bottom
-	SplitVertical                   // children laid out left-to-right
+	"github.com/atharva-0123-cs/tatami/window"
 )
 
 // StatusBarHeight is the number of terminal rows reserved for the status line.
 const StatusBarHeight = 1
 
-// LayoutNode is a node in the layout tree. A leaf holds a single Pane;
-// a container holds children arranged in one direction.
-//
-// Sibling rectangles within one container partition the container's rectangle
-// proportionally to their sizes (seamSpans). Each leaf insets its assigned
-// rectangle by the window's gap inset on every side when drawing, so adjacent
-// panes keep a thin visible gutter instead of touching borders. Leaf nodes have
-// a nil children/sizes slice; container nodes have a nil Pane.
-type LayoutNode struct {
-	Leaf   bool
-	Pane   *pane.Pane // non-nil only if Leaf
-	Dir    SplitDir   // meaningful only if !Leaf
-	Parent *LayoutNode
-
-	children []*LayoutNode
-	sizes    []int // proportional sizes for flex layout
-}
-
-// AddChild appends a child to a container node.
-//
-// The child records this node as its Parent and receives the given
-// proportional flex size; the existing sizes are left unchanged.
-func (n *LayoutNode) AddChild(child *LayoutNode, size int) {
-	child.Parent = n
-	n.children = append(n.children, child)
-	n.sizes = append(n.sizes, size)
-}
-
-// RemoveChild removes a child from a container node.
-//
-// The child's Parent is cleared, and both the children and matching size
-// entries are removed. If child is not present the node is unchanged.
-func (n *LayoutNode) RemoveChild(child *LayoutNode) {
-	for i, c := range n.children {
-		if c == child {
-			n.children = append(n.children[:i], n.children[i+1:]...)
-			n.sizes = append(n.sizes[:i], n.sizes[i+1:]...)
-			child.Parent = nil
-			return
-		}
-	}
-}
-
-// Children returns the children slice (read-only).
-func (n *LayoutNode) Children() []*LayoutNode { return n.children }
-
-// Sizes returns the proportional sizes slice (read-only).
-func (n *LayoutNode) Sizes() []int { return n.sizes }
-
-// ReplaceChild replaces oldChild with newChild in the parent container.
-//
-// The new child adopts the container as its Parent; oldChild is detached. The
-// proportional sizes are kept as-is (the replacement inherits the old slot's
-// weight). If oldChild is not found the tree is unchanged.
-func (n *LayoutNode) ReplaceChild(oldChild, newChild *LayoutNode) {
-	for i, c := range n.children {
-		if c == oldChild {
-			n.children[i] = newChild
-			newChild.Parent = n
-			oldChild.Parent = nil
-			return
-		}
-	}
-}
-
-// Window holds the saved layout state for a single window (workspace).
-// Only the active window's state lives directly on the WindowManager fields;
-// all windows have a matching entry in the windows slice (the active one at
-// currentWin) that acts as the save slot.
-type Window struct {
-	name      string
-	root      *LayoutNode
-	focused   *pane.Pane
-	paneCount int
-	zoomed    *pane.Pane
-}
-
 // WindowManager manages the tree of panes and positions them on the screen.
 // It supports multiple windows (workspaces); only one is active at a time.
+//
 // The active window's state lives directly on the WindowManager fields
-// (root, focused, etc.) so all existing code works unchanged; the windows
-// slice holds one Window per window (the entry at currentWin mirrors the
-// active state and is refreshed on every switch).
+// (root, focused, etc.) so all the layout algorithms work unchanged; the
+// embedded window.Registry holds one Window save slot per window, and the
+// entry at CurrentWin mirrors the active state and is refreshed on every
+// switch.
 type WindowManager struct {
-	root      *LayoutNode
+	root      *window.Node
 	focused   *pane.Pane
 	paneCount int // monotonically increasing for unique labels
 	zoomed    *pane.Pane
 
-	windows    []*Window // one entry per window; active one at currentWin
-	currentWin int       // index of the active window in windows
-	windowName string    // name of the currently active window
+	window.Registry // ordered list of windows; active one at CurrentWin
 
 	gap     int // gutter (in cells) between adjacent panes, also the outer margin basis
 	inset   int // per-pane inset on every side (derived from gap)
@@ -132,9 +50,7 @@ type WindowManager struct {
 // gap defaults to one cell (see SetPaneGap).
 func NewWindowManager() *WindowManager {
 	wm := &WindowManager{
-		windows:    []*Window{{name: "1"}},
-		currentWin: 0,
-		windowName: "1",
+		Registry: *window.NewRegistry(),
 	}
 	wm.SetPaneGap(1)
 	return wm
@@ -159,7 +75,7 @@ func (wm *WindowManager) FocusedPane() *pane.Pane { return wm.focused }
 // Counts the leaves of the tree (excluding empty/nil leaves) by walking it.
 func (wm *WindowManager) PaneCount() int {
 	count := 0
-	wm.walk(wm.root, func(n *LayoutNode) {
+	wm.walk(wm.root, func(n *window.Node) {
 		if n.Leaf && n.Pane != nil {
 			count++
 		}
@@ -174,7 +90,7 @@ func (wm *WindowManager) PaneCount() int {
 func (wm *WindowManager) PaneIndex(p *pane.Pane) int {
 	idx := 0
 	found := -1
-	wm.walk(wm.root, func(n *LayoutNode) {
+	wm.walk(wm.root, func(n *window.Node) {
 		if n.Leaf {
 			idx++
 			if n.Pane == p {
@@ -188,7 +104,7 @@ func (wm *WindowManager) PaneIndex(p *pane.Pane) int {
 // collectPanes returns all leaf panes in tree order.
 func (wm *WindowManager) collectPanes() []*pane.Pane {
 	var out []*pane.Pane
-	wm.walk(wm.root, func(n *LayoutNode) {
+	wm.walk(wm.root, func(n *window.Node) {
 		if n.Leaf && n.Pane != nil {
 			out = append(out, n.Pane)
 		}
@@ -206,15 +122,15 @@ func (wm *WindowManager) CollectPanes() []*pane.Pane { return wm.collectPanes() 
 // order then traversal order. Used at shutdown to close every PTY.
 func (wm *WindowManager) CollectAllPanes() []*pane.Pane {
 	var out []*pane.Pane
-	for i, w := range wm.windows {
-		root := w.root
-		if i == wm.currentWin {
+	for i, w := range wm.Windows {
+		root := w.Root
+		if i == wm.CurrentWin {
 			root = wm.root
 		}
 		if root == nil {
 			continue
 		}
-		wm.walk(root, func(n *LayoutNode) {
+		wm.walk(root, func(n *window.Node) {
 			if n.Leaf && n.Pane != nil {
 				out = append(out, n.Pane)
 			}
@@ -227,12 +143,12 @@ func (wm *WindowManager) CollectAllPanes() []*pane.Pane {
 //
 // A nil tree visits nothing; children are visited after their parent so callers
 // receive both containers and leaves unless they filter by n.Leaf.
-func (wm *WindowManager) walk(n *LayoutNode, fn func(*LayoutNode)) {
+func (wm *WindowManager) walk(n *window.Node, fn func(*window.Node)) {
 	if n == nil {
 		return
 	}
 	fn(n)
-	for _, c := range n.children {
+	for _, c := range n.Children {
 		wm.walk(c, fn)
 	}
 }
@@ -240,9 +156,9 @@ func (wm *WindowManager) walk(n *LayoutNode, fn func(*LayoutNode)) {
 // findLeaf returns the leaf node that contains the given pane.
 //
 // Returns nil when the pane is not in the tree (e.g. already closed).
-func (wm *WindowManager) findLeaf(p *pane.Pane) *LayoutNode {
-	var found *LayoutNode
-	wm.walk(wm.root, func(n *LayoutNode) {
+func (wm *WindowManager) findLeaf(p *pane.Pane) *window.Node {
+	var found *window.Node
+	wm.walk(wm.root, func(n *window.Node) {
 		if n.Leaf && n.Pane == p {
 			found = n
 		}
@@ -251,8 +167,8 @@ func (wm *WindowManager) findLeaf(p *pane.Pane) *LayoutNode {
 }
 
 // childIndex returns the index of child in n, or -1.
-func (wm *WindowManager) childIndex(n *LayoutNode, child *LayoutNode) int {
-	for i, c := range n.children {
+func (wm *WindowManager) childIndex(n *window.Node, child *window.Node) int {
+	for i, c := range n.Children {
 		if c == child {
 			return i
 		}
@@ -261,47 +177,41 @@ func (wm *WindowManager) childIndex(n *LayoutNode, child *LayoutNode) int {
 }
 
 // WindowCount returns the total number of windows.
-func (wm *WindowManager) WindowCount() int { return len(wm.windows) }
+func (wm *WindowManager) WindowCount() int { return wm.Count() }
 
 // WindowIndex returns the 1-based index of the active window.
-func (wm *WindowManager) WindowIndex() int { return wm.currentWin + 1 }
+func (wm *WindowManager) WindowIndex() int { return wm.Index() + 1 }
 
 // WindowName returns the name of the active window.
-func (wm *WindowManager) WindowName() string { return wm.windowName }
+func (wm *WindowManager) WindowName() string { return wm.Name() }
 
 // WindowNames returns the names of all windows in order.
-func (wm *WindowManager) WindowNames() []string {
-	names := make([]string, len(wm.windows))
-	for i, w := range wm.windows {
-		names[i] = w.name
-	}
-	return names
-}
+func (wm *WindowManager) WindowNames() []string { return wm.Names() }
 
 // saveCurrent stores the active window's state into its save slot in the
-// windows slice.
+// Windows slice.
 func (wm *WindowManager) saveCurrent() {
-	w := wm.windows[wm.currentWin]
-	w.root = wm.root
-	w.focused = wm.focused
-	w.paneCount = wm.paneCount
-	w.zoomed = wm.zoomed
+	w := wm.Active()
+	w.Root = wm.root
+	w.Focused = wm.focused
+	w.PaneCount = wm.paneCount
+	w.Zoomed = wm.zoomed
 }
 
 // switchTo saves the active window, then activates the window at the given
 // index, restoring its layout state.
 func (wm *WindowManager) switchTo(idx int) {
-	if idx < 0 || idx >= len(wm.windows) {
+	if idx < 0 || idx >= len(wm.Windows) {
 		return
 	}
 	wm.saveCurrent()
-	w := wm.windows[idx]
-	wm.root = w.root
-	wm.focused = w.focused
-	wm.paneCount = w.paneCount
-	wm.zoomed = w.zoomed
-	wm.windowName = w.name
-	wm.currentWin = idx
+	w := wm.Windows[idx]
+	wm.root = w.Root
+	wm.focused = w.Focused
+	wm.paneCount = w.PaneCount
+	wm.zoomed = w.Zoomed
+	wm.Registry.WindowName = w.Name
+	wm.CurrentWin = idx
 }
 
 // NewWindow creates a new window after the current one and switches to it.
@@ -315,22 +225,22 @@ func (wm *WindowManager) NewWindow() error {
 	// Determine the next name: one above the highest existing number so
 	// names never collide even after windows are closed.
 	next := 1
-	for _, w := range wm.windows {
+	for _, w := range wm.Windows {
 		var n int
-		if _, err := fmt.Sscanf(w.name, "%d", &n); err == nil && n >= next {
+		if _, err := fmt.Sscanf(w.Name, "%d", &n); err == nil && n >= next {
 			next = n + 1
 		}
 	}
 
-	insertAt := wm.currentWin + 1
-	w := &Window{name: fmt.Sprintf("%d", next)}
-	wm.windows = append(wm.windows, nil)
-	copy(wm.windows[insertAt+1:], wm.windows[insertAt:])
-	wm.windows[insertAt] = w
+	insertAt := wm.CurrentWin + 1
+	w := &window.Window{Name: fmt.Sprintf("%d", next)}
+	wm.Windows = append(wm.Windows, nil)
+	copy(wm.Windows[insertAt+1:], wm.Windows[insertAt:])
+	wm.Windows[insertAt] = w
 
 	// Switch to the new (empty) window.
-	wm.currentWin = insertAt
-	wm.windowName = w.name
+	wm.CurrentWin = insertAt
+	wm.Registry.WindowName = w.Name
 	wm.root = nil
 	wm.focused = nil
 	wm.zoomed = nil
@@ -346,18 +256,18 @@ func (wm *WindowManager) NewWindow() error {
 // NextWindow switches to the next window (wrapping around). No-op when there
 // is only one window.
 func (wm *WindowManager) NextWindow() {
-	if len(wm.windows) <= 1 {
+	if len(wm.Windows) <= 1 {
 		return
 	}
-	wm.switchTo((wm.currentWin + 1) % len(wm.windows))
+	wm.switchTo((wm.CurrentWin + 1) % len(wm.Windows))
 }
 
 // PrevWindow switches to the previous window (wrapping around).
 func (wm *WindowManager) PrevWindow() {
-	if len(wm.windows) <= 1 {
+	if len(wm.Windows) <= 1 {
 		return
 	}
-	wm.switchTo((wm.currentWin - 1 + len(wm.windows)) % len(wm.windows))
+	wm.switchTo((wm.CurrentWin - 1 + len(wm.Windows)) % len(wm.Windows))
 }
 
 // windowGone removes the (now empty) active window and switches to a
@@ -365,28 +275,28 @@ func (wm *WindowManager) PrevWindow() {
 //
 // Called by closeLeaf when the last pane in the active window is closed.
 func (wm *WindowManager) windowGone() bool {
-	if len(wm.windows) == 1 {
+	if len(wm.Windows) == 1 {
 		wm.root = nil
 		wm.focused = nil
 		wm.zoomed = nil
 		return true
 	}
-	idx := wm.currentWin
-	wm.windows = append(wm.windows[:idx], wm.windows[idx+1:]...)
+	idx := wm.CurrentWin
+	wm.Windows = append(wm.Windows[:idx], wm.Windows[idx+1:]...)
 	wm.root = nil
 	wm.focused = nil
 	wm.zoomed = nil
 	wm.paneCount = 0
 
-	if idx >= len(wm.windows) {
-		idx = len(wm.windows) - 1
+	if idx >= len(wm.Windows) {
+		idx = len(wm.Windows) - 1
 	}
-	w := wm.windows[idx]
-	wm.root = w.root
-	wm.focused = w.focused
-	wm.paneCount = w.paneCount
-	wm.zoomed = w.zoomed
-	wm.windowName = w.name
-	wm.currentWin = idx
+	w := wm.Windows[idx]
+	wm.root = w.Root
+	wm.focused = w.Focused
+	wm.paneCount = w.PaneCount
+	wm.zoomed = w.Zoomed
+	wm.Registry.WindowName = w.Name
+	wm.CurrentWin = idx
 	return false
 }

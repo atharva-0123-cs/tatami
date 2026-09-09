@@ -2,9 +2,11 @@
 // container. The layout reflows on the next Draw pass.
 package layout
 
+import "github.com/atharva-0123-cs/tatami/window"
+
 // IncreaseSize and DecreaseSize adjust the proportion of the focused pane.
-func (wm *WindowManager) IncreaseSize(dir SplitDir) { wm.adjustSize(dir, 1) }
-func (wm *WindowManager) DecreaseSize(dir SplitDir) { wm.adjustSize(dir, -1) }
+func (wm *WindowManager) IncreaseSize(dir window.SplitDir) { wm.adjustSize(dir, 1) }
+func (wm *WindowManager) DecreaseSize(dir window.SplitDir) { wm.adjustSize(dir, -1) }
 
 // adjustSize nudges the focused pane's size proportion by delta, floored at 1.
 //
@@ -12,7 +14,7 @@ func (wm *WindowManager) DecreaseSize(dir SplitDir) { wm.adjustSize(dir, -1) }
 // (so left/right resize only works on vertical splits, up/down on horizontal
 // ones). The sibling proportions stay fixed; the layout reflows on the next
 // Draw. Sizes are floored at 1 so a pane can never disappear entirely.
-func (wm *WindowManager) adjustSize(dir SplitDir, delta int) {
+func (wm *WindowManager) adjustSize(dir window.SplitDir, delta int) {
 	if wm.focused == nil || wm.root == nil {
 		return
 	}
@@ -25,9 +27,9 @@ func (wm *WindowManager) adjustSize(dir SplitDir, delta int) {
 		return
 	}
 	idx := wm.childIndex(parent, focusedNode)
-	newSize := parent.sizes[idx] + delta
+	newSize := parent.Sizes[idx] + delta
 	if newSize < 1 {
 		newSize = 1
 	}
-	parent.sizes[idx] = newSize
+	parent.Sizes[idx] = newSize
 }

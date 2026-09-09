@@ -5,6 +5,7 @@ package pane
 import (
 	"fmt"
 
+	"github.com/atharva-0123-cs/tatami/term"
 	"github.com/creack/pty"
 	"github.com/gdamore/tcell/v2"
 )
@@ -39,7 +40,7 @@ func (p *Pane) Draw(x0, y0, x1, y1 int, isFocused bool, screen tcell.Screen) (cx
 	if w != p.width || h != p.height {
 		p.width = w
 		p.height = h
-		p.term.resize(w, h)
+		p.term.Resize(w, h)
 		p.ptyMtx.Lock()
 		if p.pty != nil {
 			if err := pty.Setsize(p.pty, &pty.Winsize{Rows: uint16(h), Cols: uint16(w)}); err != nil {
@@ -109,15 +110,15 @@ func (p *Pane) Draw(x0, y0, x1, y1 int, isFocused bool, screen tcell.Screen) (cx
 
 	// In copy mode the grid may be scrolled back; if so, render the view rows
 	// (scrollback window above the live grid) and hide the cursor.
-	viewRows := p.term.scrollOff
-	for y := 0; y < h && y < p.term.rows+viewRows; y++ {
-		row := p.term.viewRow(y)
-		for x := 0; x < w && x < p.term.cols; x++ {
+	viewRows := p.term.ScrollOffset()
+	for y := 0; y < h && y < p.term.Rows()+viewRows; y++ {
+		row := p.term.ViewRow(y)
+		for x := 0; x < w && x < p.term.Cols(); x++ {
 			c := row[x]
-			if c.wide {
+			if c.Wide {
 				continue // right half of a double-width rune drawn at x-1
 			}
-			ch := c.ch
+			ch := c.Ch
 			if ch == 0 {
 				ch = ' '
 			}
@@ -125,9 +126,9 @@ func (p *Pane) Draw(x0, y0, x1, y1 int, isFocused bool, screen tcell.Screen) (cx
 		}
 	}
 
-	if isFocused && viewRows == 0 && p.term.cursorVisible {
-		cx = innerX + p.term.x
-		cy = innerY + p.term.y
+	if isFocused && viewRows == 0 && p.term.CursorVisible() {
+		cx = innerX + p.term.CursorX()
+		cy = innerY + p.term.CursorY()
 		if cx >= innerX && cx < innerX+w && cy >= innerY && cy < innerY+h {
 			hasCursor = true
 		}
@@ -141,42 +142,42 @@ func (p *Pane) Draw(x0, y0, x1, y1 int, isFocused bool, screen tcell.Screen) (cx
 // and truecolor cells carry their original RGB components; bold and underline
 // become style attributes.
 //
-// The vtColor->tcell.Color translation mirrors the inverse of the emulator's
+// The term.Color->tcell.Color translation mirrors the inverse of the emulator's
 // SGR parsing: default stays default (so the surrounding terminal theme wins),
 // palette indices map through tcell.PaletteColor, and RGB triples map through
 // tcell.NewRGBColor.
-func cellToStyle(c vtCell) tcell.Style {
-	if c.reverse {
-		c.fg, c.bg = c.bg, c.fg
+func cellToStyle(c term.Cell) tcell.Style {
+	if c.Reverse {
+		c.Fg, c.Bg = c.Bg, c.Fg
 	}
 	st := tcell.StyleDefault
-	if c.fg.def {
+	if c.Fg.Def {
 		st = st.Foreground(tcell.ColorDefault)
-	} else if c.fg.rgb {
-		st = st.Foreground(tcell.NewRGBColor(int32(c.fg.r), int32(c.fg.g), int32(c.fg.b)))
+	} else if c.Fg.RGB {
+		st = st.Foreground(tcell.NewRGBColor(int32(c.Fg.R), int32(c.Fg.G), int32(c.Fg.B)))
 	} else {
-		st = st.Foreground(tcell.PaletteColor(c.fg.idx))
+		st = st.Foreground(tcell.PaletteColor(c.Fg.Idx))
 	}
-	if c.bg.def {
+	if c.Bg.Def {
 		st = st.Background(tcell.ColorDefault)
-	} else if c.bg.rgb {
-		st = st.Background(tcell.NewRGBColor(int32(c.bg.r), int32(c.bg.g), int32(c.bg.b)))
+	} else if c.Bg.RGB {
+		st = st.Background(tcell.NewRGBColor(int32(c.Bg.R), int32(c.Bg.G), int32(c.Bg.B)))
 	} else {
-		st = st.Background(tcell.PaletteColor(c.bg.idx))
+		st = st.Background(tcell.PaletteColor(c.Bg.Idx))
 	}
-	if c.bold {
+	if c.Bold {
 		st = st.Bold(true)
 	}
-	if c.dim {
+	if c.Dim {
 		st = st.Dim(true)
 	}
-	if c.italic {
+	if c.Italic {
 		st = st.Italic(true)
 	}
-	if c.underline {
+	if c.Underline {
 		st = st.Underline(true)
 	}
-	if c.strikethrough {
+	if c.Strikethrough {
 		st = st.StrikeThrough(true)
 	}
 	return st

@@ -35,7 +35,7 @@ func (p *Pane) HandleEvent(ev *tcell.EventKey) bool {
 func (p *Pane) AppCursorKeys() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.term != nil && p.term.decckm
+	return p.term != nil && p.term.AppKeys()
 }
 
 // CopyText copies the pane's scrollback + screen to the system clipboard.
@@ -50,7 +50,7 @@ func (p *Pane) CopyText() (string, error) {
 	if p.term == nil {
 		return "", fmt.Errorf("pane not ready")
 	}
-	text := p.term.allText()
+	text := p.term.AllText()
 	if text == "" {
 		return "nothing to copy", nil
 	}
@@ -74,7 +74,7 @@ func (p *Pane) CopyText() (string, error) {
 func (p *Pane) Paste() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.term != nil && p.term.bracketedPaste
+	return p.term != nil && p.term.BracketedPaste()
 }
 
 // KeyToBytes converts a tcell event into the byte sequence expected by a terminal.

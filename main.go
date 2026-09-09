@@ -1,3 +1,9 @@
+// Command tatami is a terminal multiplexer.
+//
+// main is a thin launcher: it opens and configures the log file, loads the
+// configuration profile, and hands off to the app package, which owns the
+// tcell screen, the layout, and the event loop. Terminal cleanup is
+// guaranteed via the deferred app.Cleanup even on a startup failure.
 package main
 
 import (
@@ -5,12 +11,9 @@ import (
 	"log/slog"
 	"os"
 
-	"github.com/gdamore/tcell/v2"
-
 	"github.com/atharva-0123-cs/tatami/config"
 	"github.com/atharva-0123-cs/tatami/format"
-	"github.com/atharva-0123-cs/tatami/layout"
-	"github.com/atharva-0123-cs/tatami/pane"
+	"github.com/atharva-0123-cs/tatami/internal/app"
 )
 
 func openLogFile() *os.File {
@@ -34,18 +37,6 @@ func setupLogger(f *os.File, level slog.Level, kind string) {
 	slog.SetDefault(slog.New(h))
 }
 
-// fail logs a fatal startup error (to the log file) and mirrors it on stderr
-// before exiting with status 1.
-func fail(msg string, err error) {
-	if err != nil {
-		msg = fmt.Sprintf("%s: %v", msg, err)
-	}
-	slog.Error(msg)
-	fmt.Fprintf(os.Stderr, "tatami: %s\n", msg)
-	cleanup()
-	os.Exit(1)
-}
-
 func main() {
 	f := openLogFile()
 	defer f.Close()
@@ -63,120 +54,13 @@ func main() {
 		"pane_gap", cfg.PaneGap,
 	)
 
-	// Defer cleanup until the very end, so panics restore the terminal too.
-	defer cleanup()
-
-	var err error
-	screen, err = tcell.NewScreen() // assign to package-level var (never shadow it)
+	a, err := app.New(cfg)
 	if err != nil {
-		fail("error creating screen", err)
+		slog.Error(err.Error())
+		fmt.Fprintf(os.Stderr, "tatami: %s\n", err)
+		os.Exit(1)
 	}
-	if err = screen.Init(); err != nil {
-		fail("error initializing screen", err)
-	}
-	if cfg.Mouse {
-		screen.EnableMouse(tcell.MouseButtonEvents | tcell.MouseDragEvents)
-	}
+	defer a.Cleanup()
 
-	// Wake the PollEvent loop whenever a background goroutine (PTY output
-	// reader, process-exit waiter) has new data to show.
-	pane.Interrupt = func() {
-		_ = screen.PostEvent(tcell.NewEventInterrupt(nil))
-	}
-
-	wm = layout.NewWindowManager()
-	wm.SetPaneGap(cfg.PaneGap)
-	if err := wm.NewPane(); err != nil {
-		fail("error creating initial pane", err)
-	}
-
-	style := layout.StatusStyle{PrefixLabel: cfg.PrefixLabel, Fg: cfg.StatusFg, Bg: cfg.StatusBg}
-
-	render := func() {
-		screen.Clear()
-		w, h := screen.Size()
-		wm.Draw(screen, w, h, prefixActive, resizeMode, copyMode, errorMsg, style)
-		screen.Show()
-	}
-
-	render()
-
-	for !shouldQuit {
-		ev := screen.PollEvent()
-
-		// Auto-close panes whose shell exited (e.g. `exit`); if the last
-		// pane closed this way, quit the app.
-		if wm.CloseDeadPanes() {
-			shouldQuit = true
-		}
-
-		switch ev := ev.(type) {
-		case *tcell.EventKey:
-			errorMsg = ""
-			if pasteActive {
-				// While bracketed paste is active, raw content is forwarded
-				// verbatim so pasted text can never be mistaken for prefix
-				// commands (Ctrl+A, q, x, ...).
-				forwardKey(ev)
-			} else if !handleKey(ev, cfg.PrefixKey) {
-				forwardKey(ev)
-			}
-			render()
-
-		case *tcell.EventPaste:
-			if ev.Start() {
-				pasteActive = true
-				if focused := wm.FocusedPane(); focused != nil && focused.Paste() {
-					_, _ = focused.WriteInput([]byte("\x1b[200~"))
-				}
-			} else {
-				pasteActive = false
-				if focused := wm.FocusedPane(); focused != nil && focused.Paste() {
-					_, _ = focused.WriteInput([]byte("\x1b[201~"))
-				}
-			}
-			render()
-
-		case *tcell.EventMouse:
-			buttons := ev.Buttons()
-			if buttons&tcell.ButtonPrimary != 0 {
-				px, py := ev.Position()
-				sw, sh := screen.Size()
-				if wm.FocusAt(px, py, sw, sh) {
-					render()
-				}
-			}
-
-		case *tcell.EventResize:
-			render()
-
-		case *tcell.EventInterrupt:
-			render()
-
-		case *tcell.EventError:
-			slog.Error("screen event error", "err", ev.Error())
-		}
-	}
-
-}
-
-// cleanup terminates every pane's process, finalizes the tcell screen (if it
-// was initialized), and restores the terminal to its original state. It is safe
-// to call multiple times.
-func cleanup() {
-	if wm != nil {
-		for _, p := range wm.CollectAllPanes() {
-			_ = p.Close()
-		}
-		wm = nil
-	}
-	if screen != nil {
-		screen.Fini()
-		screen = nil
-	}
-	// tcell's restore is terminfo-dependent and on some terminals leaves the
-	// alternate screen active with raw cursor/character modes. Emit the standard
-	// xterm reset sequences directly to stdout so the shell always regains a
-	// clean, interactive terminal regardless of the terminfo entry used.
-	fmt.Fprint(os.Stdout, "\x1b[0m\x1b[39;49m\x1b[?25h\x1b[?1l\x1b[?1049l")
+	a.Run()
 }

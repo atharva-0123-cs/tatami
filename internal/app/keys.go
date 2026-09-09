@@ -1,7 +1,7 @@
-// Multiplexer key handling: the prefix/resize command parser (handleKey) and
-// the passthrough used for unhandled events and bracketed paste (forwardKey).
-// The mode state these functions read and write lives in state.go.
-package main
+// Multiplexer key handling: the prefix/resize/copy command parser (handleKey)
+// and the passthrough used for unhandled events and bracketed paste
+// (forwardKey). The mode state these methods read and write lives on the App.
+package app
 
 import (
 	"fmt"
@@ -9,8 +9,11 @@ import (
 
 	"github.com/gdamore/tcell/v2"
 
-	"github.com/atharva-0123-cs/tatami/layout"
-) // handleKey processes the multiplexer's prefix and resize commands.
+	"github.com/atharva-0123-cs/tatami/window"
+)
+
+// handleKey processes the multiplexer's prefix and resize commands.
+//
 // It returns true when the multiplexer consumed the event (a command ran or a
 // mode was toggled) and false when the caller should forward the event to the
 // focused pane's shell. The precedence is:
@@ -24,99 +27,98 @@ import (
 //  4. While prefix mode is active, run the bound command (splits, close,
 //     focus, zoom, rotate, swap, resize, jump, quit). Only plain characters
 //     (KeyRune) trigger letter commands; arrow keys move focus; any other key
-//     simply ends prefix mode without an action, mirroring the historical
-//     termbox behavior where modified keys had Ch == 0.
+//     simply ends prefix mode without an action.
 //  5. Otherwise the event is forwarded to the shell.
-func handleKey(ev *tcell.EventKey, prefix tcell.Key) bool {
+func (a *App) handleKey(ev *tcell.EventKey) bool {
 	// Escape cancels prefix and resize mode.
 	if ev.Key() == tcell.KeyEsc {
-		if copyMode {
-			copyMode = false
-			copyOffset = 0
-			if focused := wm.FocusedPane(); focused != nil {
+		if a.copyMode {
+			a.copyMode = false
+			a.copyOffset = 0
+			if focused := a.wm.FocusedPane(); focused != nil {
 				focused.Scroll(0)
 			}
 			return true
 		}
-		if resizeMode || prefixActive {
-			resizeMode = false
-			prefixActive = false
+		if a.resizeMode || a.prefixActive {
+			a.resizeMode = false
+			a.prefixActive = false
 			return true
 		}
 		return false // forward Esc to the shell
 	}
 
 	// The configured prefix toggles prefix mode.
-	if ev.Key() == prefix {
-		if resizeMode {
-			resizeMode = false
+	if ev.Key() == a.prefixKey {
+		if a.resizeMode {
+			a.resizeMode = false
 		}
-		prefixActive = !prefixActive
+		a.prefixActive = !a.prefixActive
 		return true
 	}
 
 	// Copy mode: j/k scroll, y copies visible text, q exits.
-	if copyMode {
+	if a.copyMode {
 		if ev.Key() == tcell.KeyRune {
 			switch ev.Rune() {
 			case 'j':
-				if copyOffset > 0 {
-					copyOffset--
-					if focused := wm.FocusedPane(); focused != nil {
-						focused.Scroll(copyOffset)
+				if a.copyOffset > 0 {
+					a.copyOffset--
+					if focused := a.wm.FocusedPane(); focused != nil {
+						focused.Scroll(a.copyOffset)
 					}
 				}
 				return true
 			case 'k':
-				copyOffset++
-				if focused := wm.FocusedPane(); focused != nil {
-					focused.Scroll(copyOffset)
+				a.copyOffset++
+				if focused := a.wm.FocusedPane(); focused != nil {
+					focused.Scroll(a.copyOffset)
 				}
 				return true
 			case 'y':
-				copyMode = false
-				copyOffset = 0
-				if focused := wm.FocusedPane(); focused != nil {
+				a.copyMode = false
+				a.copyOffset = 0
+				if focused := a.wm.FocusedPane(); focused != nil {
 					focused.Scroll(0)
 					msg, err := focused.CopyText()
 					if err != nil {
-						setErrorMessage(err.Error())
+						a.SetErrorMsg(err.Error())
 					} else {
-						setErrorMessage(msg)
+						a.SetErrorMsg(msg)
 					}
 				}
 				return true
 			case 'q':
-				copyMode = false
-				copyOffset = 0
-				if focused := wm.FocusedPane(); focused != nil {
+				a.copyMode = false
+				a.copyOffset = 0
+				if focused := a.wm.FocusedPane(); focused != nil {
 					focused.Scroll(0)
 				}
 				return true
 			}
 		}
 		// Any other key exits copy mode.
-		copyMode = false
-		copyOffset = 0
-		if focused := wm.FocusedPane(); focused != nil {
+		a.copyMode = false
+		a.copyOffset = 0
+		if focused := a.wm.FocusedPane(); focused != nil {
 			focused.Scroll(0)
 		}
 		return true
 	}
 
 	// Resize mode: h/j/k/l adjust the focused pane's proportions.
-	if resizeMode {
-		resizeMode = false
+	if a.resizeMode {
+		a.resizeMode = false
 		if ev.Key() == tcell.KeyRune {
 			switch ev.Rune() {
 			case 'h':
-				wm.DecreaseSize(layout.SplitVertical)
+				a.wm.DecreaseSize(window.SplitVertical)
 			case 'l':
-				wm.IncreaseSize(layout.SplitVertical)
+				a.wm.IncreaseSize(window.SplitVertical)
 			case 'k':
-				wm.DecreaseSize(layout.SplitHorizontal)
+				a.wm.DecreaseSize(window.SplitHorizontal)
 			case 'j':
-				wm.IncreaseSize(layout.SplitHorizontal)
+				a.wm.IncreaseSize(window.SplitHorizontal)
 			}
 		}
 		return true
@@ -124,87 +126,87 @@ func handleKey(ev *tcell.EventKey, prefix tcell.Key) bool {
 
 	// Prefix mode commands. Only unmodified characters (KeyRune) act as
 	// letter commands; any other key simply ends prefix mode.
-	if prefixActive {
-		prefixActive = false
+	if a.prefixActive {
+		a.prefixActive = false
 		if ev.Key() == tcell.KeyRune {
 			ch := ev.Rune()
 
 			// Numbered pane selection: 1-9 jumps to pane N.
 			if ch >= '1' && ch <= '9' {
 				idx := int(ch - '0')
-				panes := wm.CollectPanes()
+				panes := a.wm.CollectPanes()
 				if idx >= 1 && idx <= len(panes) {
-					wm.FocusPane(panes[idx-1])
+					a.wm.FocusPane(panes[idx-1])
 				} else {
-					setErrorMessage(fmt.Sprintf("Invalid pane: %d (total %d)", idx, len(panes)))
+					a.SetErrorMsg(fmt.Sprintf("Invalid pane: %d (total %d)", idx, len(panes)))
 				}
 				return true
 			}
 
 			switch ch {
 			case 'c', '-': // Horizontal split (top/bottom)
-				if err := wm.NewPane(); err != nil {
+				if err := a.wm.NewPane(); err != nil {
 					slog.Error("split failed", "dir", "horizontal", "err", err)
-					setErrorMessage(fmt.Sprintf("Split failed: %v", err))
+					a.SetErrorMsg(fmt.Sprintf("Split failed: %v", err))
 				}
 				return true
 			case 'C', '|': // Vertical split (left/right)
-				if err := wm.NewPaneVertical(); err != nil {
+				if err := a.wm.NewPaneVertical(); err != nil {
 					slog.Error("split failed", "dir", "vertical", "err", err)
-					setErrorMessage(fmt.Sprintf("Split failed: %v", err))
+					a.SetErrorMsg(fmt.Sprintf("Split failed: %v", err))
 				}
 				return true
 			case 'x': // Close current pane
-				if wm.CloseCurrentPane() {
-					shouldQuit = true
+				if a.wm.CloseCurrentPane() {
+					a.shouldQuit = true
 				}
 				return true
 			case 'h':
-				wm.FocusLeft()
+				a.wm.FocusLeft()
 				return true
 			case 'j':
-				wm.FocusDown()
+				a.wm.FocusDown()
 				return true
 			case 'k':
-				wm.FocusUp()
+				a.wm.FocusUp()
 				return true
 			case 'l':
-				wm.FocusRight()
+				a.wm.FocusRight()
 				return true
 			case 'z':
-				wm.Zoom()
+				a.wm.Zoom()
 				return true
 			case 'o':
-				wm.RotateFocused(1)
+				a.wm.RotateFocused(1)
 				return true
 			case '}':
-				wm.SwapNext()
+				a.wm.SwapNext()
 				return true
 			case '{':
-				wm.SwapPrev()
+				a.wm.SwapPrev()
 				return true
 			case 'r':
-				resizeMode = true
+				a.resizeMode = true
 				return true
 			case 'q':
-				shouldQuit = true
+				a.shouldQuit = true
 				return true
 			case 'w':
-				wm.NextWindow()
+				a.wm.NextWindow()
 				return true
 			case 'W', 'p':
-				wm.PrevWindow()
+				a.wm.PrevWindow()
 				return true
 			case 'n':
-				if err := wm.NewWindow(); err != nil {
+				if err := a.wm.NewWindow(); err != nil {
 					slog.Error("failed to create window", "err", err)
-					setErrorMessage(fmt.Sprintf("New window failed: %v", err))
+					a.SetErrorMsg(fmt.Sprintf("New window failed: %v", err))
 				}
 				return true
 			case '[':
-				copyMode = true
-				copyOffset = 0
-				if focused := wm.FocusedPane(); focused != nil {
+				a.copyMode = true
+				a.copyOffset = 0
+				if focused := a.wm.FocusedPane(); focused != nil {
 					focused.Scroll(0)
 				}
 				return true
@@ -214,16 +216,16 @@ func handleKey(ev *tcell.EventKey, prefix tcell.Key) bool {
 		// Arrow keys during prefix mode - move focus.
 		switch ev.Key() {
 		case tcell.KeyLeft:
-			wm.FocusLeft()
+			a.wm.FocusLeft()
 			return true
 		case tcell.KeyRight:
-			wm.FocusRight()
+			a.wm.FocusRight()
 			return true
 		case tcell.KeyUp:
-			wm.FocusUp()
+			a.wm.FocusUp()
 			return true
 		case tcell.KeyDown:
-			wm.FocusDown()
+			a.wm.FocusDown()
 			return true
 		}
 
@@ -241,8 +243,8 @@ func handleKey(ev *tcell.EventKey, prefix tcell.Key) bool {
 // a bracketed paste is active. The focused pane translates the tcell event
 // into the byte sequence a terminal expects and writes it to the PTY; if no
 // pane is focused the event is dropped.
-func forwardKey(ev *tcell.EventKey) {
-	if focused := wm.FocusedPane(); focused != nil {
+func (a *App) forwardKey(ev *tcell.EventKey) {
+	if focused := a.wm.FocusedPane(); focused != nil {
 		focused.HandleEvent(ev)
 	}
 }

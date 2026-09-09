@@ -6,6 +6,7 @@ import (
 	"log/slog"
 
 	"github.com/atharva-0123-cs/tatami/pane"
+	"github.com/atharva-0123-cs/tatami/window"
 )
 
 // NewPane creates a new pane. If the tree is empty it becomes the root;
@@ -23,12 +24,12 @@ func (wm *WindowManager) NewPane() error {
 	}
 
 	if wm.root == nil {
-		wm.root = &LayoutNode{Leaf: true, Pane: p}
+		wm.root = &window.Node{Leaf: true, Pane: p}
 		wm.focused = p
 		return nil
 	}
 
-	wm.splitCurrent(p, SplitHorizontal)
+	wm.splitCurrent(p, window.SplitHorizontal)
 	return nil
 }
 
@@ -46,12 +47,12 @@ func (wm *WindowManager) NewPaneVertical() error {
 	}
 
 	if wm.root == nil {
-		wm.root = &LayoutNode{Leaf: true, Pane: p}
+		wm.root = &window.Node{Leaf: true, Pane: p}
 		wm.focused = p
 		return nil
 	}
 
-	wm.splitCurrent(p, SplitVertical)
+	wm.splitCurrent(p, window.SplitVertical)
 	return nil
 }
 
@@ -67,7 +68,7 @@ func (wm *WindowManager) NewPaneVertical() error {
 //
 // The new pane always becomes focused and the two siblings start with equal
 // size weights.
-func (wm *WindowManager) splitCurrent(newPane *pane.Pane, dir SplitDir) {
+func (wm *WindowManager) splitCurrent(newPane *pane.Pane, dir window.SplitDir) {
 	focusedNode := wm.findLeaf(wm.focused)
 	if focusedNode == nil {
 		slog.Warn("splitCurrent: focused pane not found in tree")
@@ -75,20 +76,20 @@ func (wm *WindowManager) splitCurrent(newPane *pane.Pane, dir SplitDir) {
 	}
 
 	parent := focusedNode.Parent
-	newLeaf := &LayoutNode{Leaf: true, Pane: newPane}
+	newLeaf := &window.Node{Leaf: true, Pane: newPane}
 
 	if parent == nil {
-		container := &LayoutNode{Leaf: false, Dir: dir}
+		container := &window.Node{Leaf: false, Dir: dir}
 		container.AddChild(focusedNode, 1)
 		container.AddChild(newLeaf, 1)
 		wm.root = container
 	} else if parent.Dir == dir {
 		idx := wm.childIndex(parent, focusedNode)
-		parent.children = append(parent.children[:idx+1], append([]*LayoutNode{newLeaf}, parent.children[idx+1:]...)...)
-		parent.sizes = append(parent.sizes[:idx+1], append([]int{1}, parent.sizes[idx+1:]...)...)
+		parent.Children = append(parent.Children[:idx+1], append([]*window.Node{newLeaf}, parent.Children[idx+1:]...)...)
+		parent.Sizes = append(parent.Sizes[:idx+1], append([]int{1}, parent.Sizes[idx+1:]...)...)
 		newLeaf.Parent = parent
 	} else {
-		container := &LayoutNode{Leaf: false, Dir: dir}
+		container := &window.Node{Leaf: false, Dir: dir}
 		container.AddChild(focusedNode, 1)
 		container.AddChild(newLeaf, 1)
 		parent.ReplaceChild(focusedNode, container)

@@ -4,14 +4,15 @@ package layout
 
 import (
 	"github.com/atharva-0123-cs/tatami/pane"
+	"github.com/atharva-0123-cs/tatami/window"
 )
 
 // firstPane returns the first leaf pane in a subtree.
-func (wm *WindowManager) firstPane(n *LayoutNode) *pane.Pane {
+func (wm *WindowManager) firstPane(n *window.Node) *pane.Pane {
 	if n.Leaf {
 		return n.Pane
 	}
-	for _, c := range n.children {
+	for _, c := range n.Children {
 		if p := wm.firstPane(c); p != nil {
 			return p
 		}
@@ -26,7 +27,7 @@ func (wm *WindowManager) firstPane(n *LayoutNode) *pane.Pane {
 // (SplitHorizontal: up/down; SplitVertical: left/right). Focus moves to the
 // first pane inside that sibling, so crossing is always to the "nearest"
 // neighbor in that direction.
-func (wm *WindowManager) MoveFocus(dir SplitDir, delta int) {
+func (wm *WindowManager) MoveFocus(dir window.SplitDir, delta int) {
 	if wm.focused == nil || wm.root == nil {
 		return
 	}
@@ -41,8 +42,8 @@ func (wm *WindowManager) MoveFocus(dir SplitDir, delta int) {
 		if parent.Dir == dir {
 			idx := wm.childIndex(parent, current)
 			next := idx + delta
-			if next >= 0 && next < len(parent.children) {
-				if first := wm.firstPane(parent.children[next]); first != nil {
+			if next >= 0 && next < len(parent.Children) {
+				if first := wm.firstPane(parent.Children[next]); first != nil {
 					wm.setFocus(first)
 					return
 				}
@@ -66,12 +67,12 @@ func (wm *WindowManager) FocusPane(p *pane.Pane) {
 }
 
 // FocusLeft/FocusRight move focus between side-by-side panes (SplitVertical).
-func (wm *WindowManager) FocusLeft()  { wm.MoveFocus(SplitVertical, -1) }
-func (wm *WindowManager) FocusRight() { wm.MoveFocus(SplitVertical, 1) }
+func (wm *WindowManager) FocusLeft()  { wm.MoveFocus(window.SplitVertical, -1) }
+func (wm *WindowManager) FocusRight() { wm.MoveFocus(window.SplitVertical, 1) }
 
 // FocusUp/FocusDown move focus between stacked panes (SplitHorizontal).
-func (wm *WindowManager) FocusUp()   { wm.MoveFocus(SplitHorizontal, -1) }
-func (wm *WindowManager) FocusDown() { wm.MoveFocus(SplitHorizontal, 1) }
+func (wm *WindowManager) FocusUp()   { wm.MoveFocus(window.SplitHorizontal, -1) }
+func (wm *WindowManager) FocusDown() { wm.MoveFocus(window.SplitHorizontal, 1) }
 
 // FocusAt sets focus to the pane at screen coordinates (px, py).
 //
@@ -99,7 +100,7 @@ func (wm *WindowManager) FocusAt(px, py, screenW, screenH int) bool {
 }
 
 // findPaneAt recursively walks the tree to find which pane occupies (px, py).
-func (wm *WindowManager) findPaneAt(n *LayoutNode, x0, y0, x1, y1, px, py int) *pane.Pane {
+func (wm *WindowManager) findPaneAt(n *window.Node, x0, y0, x1, y1, px, py int) *pane.Pane {
 	if n == nil {
 		return nil
 	}
@@ -120,21 +121,21 @@ func (wm *WindowManager) findPaneAt(n *LayoutNode, x0, y0, x1, y1, px, py int) *
 		return nil
 	}
 	total := 0
-	for _, s := range n.sizes {
+	for _, s := range n.Sizes {
 		total += s
 	}
 	if total <= 0 {
 		return nil
 	}
-	horizontal := n.Dir == SplitHorizontal
+	horizontal := n.Dir == window.SplitHorizontal
 	avail, pos0 := 0, y0
 	if horizontal {
 		avail = y1 - y0
 	} else {
 		avail, pos0 = x1-x0, x0
 	}
-	for i, child := range n.children {
-		sp := wm.seamSpans(avail, n.sizes)[i]
+	for i, child := range n.Children {
+		sp := wm.seamSpans(avail, n.Sizes)[i]
 		if sp[1] <= sp[0] {
 			continue
 		}

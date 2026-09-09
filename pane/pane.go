@@ -1,10 +1,10 @@
 // Package pane provides the Pane type: a real shell running in a PTY paired
-// with a small VT100/xterm-compatible terminal emulator (see vt.go). Each
-// Pane owns one PTY, one goroutine that pumps shell output into the emulator
-// (output.go), and one goroutine that waits for the shell process to exit; the
-// emulated grid is drawn into the tcell screen by the main goroutine (draw.go)
-// and key events are translated for the shell in input.go. Shell spawning
-// lives in process.go.
+// with a small VT100/xterm-compatible terminal emulator (the term package).
+// Each Pane owns one PTY, one goroutine that pumps shell output into the
+// emulator (output.go), and one goroutine that waits for the shell process to
+// exit; the emulated grid is drawn into the tcell screen by the main goroutine
+// (draw.go) and key events are translated for the shell in input.go. Shell
+// spawning lives in process.go.
 package pane
 
 import (
@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/atharva-0123-cs/tatami/term"
 	"github.com/creack/pty"
 	"github.com/gdamore/tcell/v2"
 )
@@ -50,8 +51,8 @@ type Pane struct {
 	height  int
 	x0, y0  int
 	x1, y1  int
-	term    *terminal    // emulated screen
-	lg      *slog.Logger // structured logger tagged with the pane id
+	term    *term.Terminal // emulated screen
+	lg      *slog.Logger  // structured logger tagged with the pane id
 }
 
 // NewPane creates a new pane and starts a shell in a PTY.
@@ -85,7 +86,7 @@ func NewPane(label string) (*Pane, error) {
 
 	p.pty = master
 	p.cmd = startCmd
-	p.term = newTerminal(120, 40, func(b []byte) {
+	p.term = term.New(120, 40, func(b []byte) {
 		_, _ = p.WriteInput(b)
 	})
 	p.ptyMtx.Lock()

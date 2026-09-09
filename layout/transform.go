@@ -38,11 +38,11 @@ func (wm *WindowManager) swapPane(delta int) {
 	parent := focusedNode.Parent
 	idx := wm.childIndex(parent, focusedNode)
 	target := idx + delta
-	if target < 0 || target >= len(parent.children) {
+	if target < 0 || target >= len(parent.Children) {
 		return
 	}
-	parent.children[idx], parent.children[target] = parent.children[target], parent.children[idx]
-	parent.sizes[idx], parent.sizes[target] = parent.sizes[target], parent.sizes[idx]
+	parent.Children[idx], parent.Children[target] = parent.Children[target], parent.Children[idx]
+	parent.Sizes[idx], parent.Sizes[target] = parent.Sizes[target], parent.Sizes[idx]
 }
 
 // RotateFocused rotates all siblings in the parent container by one position.
@@ -59,23 +59,23 @@ func (wm *WindowManager) RotateFocused(delta int) {
 		return
 	}
 	parent := focusedNode.Parent
-	n := len(parent.children)
+	n := len(parent.Children)
 	if n < 2 {
 		return
 	}
 	if delta > 0 {
-		last := parent.children[n-1]
-		copy(parent.children[1:], parent.children[:n-1])
-		parent.children[0] = last
-		lastSize := parent.sizes[n-1]
-		copy(parent.sizes[1:], parent.sizes[:n-1])
-		parent.sizes[0] = lastSize
+		last := parent.Children[n-1]
+		copy(parent.Children[1:], parent.Children[:n-1])
+		parent.Children[0] = last
+		lastSize := parent.Sizes[n-1]
+		copy(parent.Sizes[1:], parent.Sizes[:n-1])
+		parent.Sizes[0] = lastSize
 	} else {
-		first := parent.children[0]
-		copy(parent.children[:n-1], parent.children[1:])
-		parent.children[n-1] = first
-		firstSize := parent.sizes[0]
-		copy(parent.sizes[:n-1], parent.sizes[1:])
-		parent.sizes[n-1] = firstSize
+		first := parent.Children[0]
+		copy(parent.Children[:n-1], parent.Children[1:])
+		parent.Children[n-1] = first
+		firstSize := parent.Sizes[0]
+		copy(parent.Sizes[:n-1], parent.Sizes[1:])
+		parent.Sizes[n-1] = firstSize
 	}
 }

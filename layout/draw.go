@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 
+	"github.com/atharva-0123-cs/tatami/window"
 	"github.com/gdamore/tcell/v2"
 )
 
@@ -88,7 +89,7 @@ func (wm *WindowManager) Draw(screen tcell.Screen, width, height int, prefixActi
 //
 // distribute returns (cursorX, cursorY, hasCursor); hasCursor is true only for
 // the focused pane's draw when its cursor is visible.
-func (wm *WindowManager) distribute(n *LayoutNode, x0, y0, x1, y1 int, screen tcell.Screen) (cursorX, cursorY int, hasCursor bool) {
+func (wm *WindowManager) distribute(n *window.Node, x0, y0, x1, y1 int, screen tcell.Screen) (cursorX, cursorY int, hasCursor bool) {
 	if n == nil {
 		return 0, 0, false
 	}
@@ -114,14 +115,14 @@ func (wm *WindowManager) distribute(n *LayoutNode, x0, y0, x1, y1 int, screen tc
 	}
 
 	total := 0
-	for _, s := range n.sizes {
+	for _, s := range n.Sizes {
 		total += s
 	}
 	if total <= 0 {
 		return 0, 0, false
 	}
 
-	horizontal := n.Dir == SplitHorizontal
+	horizontal := n.Dir == window.SplitHorizontal
 	avail, pos0 := 0, y0
 	if horizontal {
 		avail = y1 - y0
@@ -129,8 +130,8 @@ func (wm *WindowManager) distribute(n *LayoutNode, x0, y0, x1, y1 int, screen tc
 		avail, pos0 = x1-x0, x0
 	}
 
-	for i, child := range n.children {
-		sp := wm.seamSpans(avail, n.sizes)[i]
+	for i, child := range n.Children {
+		sp := wm.seamSpans(avail, n.Sizes)[i]
 		if sp[1] <= sp[0] {
 			continue
 		}
@@ -266,7 +267,7 @@ func (wm *WindowManager) renderStatus(screen tcell.Screen, maxX, maxY int, prefi
 	if wm.WindowCount() > 1 {
 		names := wm.WindowNames()
 		for i, name := range names {
-			if i == wm.currentWin {
+			if i == wm.CurrentWin {
 				winList += "[" + name + "] "
 			} else {
 				winList += name + " "

@@ -21,7 +21,7 @@ func (p *Pane) readPtyOutput() {
 		if n > 0 {
 			p.mu.Lock()
 			if p.term != nil {
-				p.term.process(buf[:n])
+				p.term.Process(buf[:n])
 			}
 			p.mu.Unlock()
 			Interrupt()

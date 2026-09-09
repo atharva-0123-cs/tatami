@@ -67,13 +67,14 @@ bracketed, e.g. `[1] 2 3`.
 ## Layout
 
 ```
-main.go     entrypoint, tcell init, event loop
-keys.go     prefix/resize/copy-mode command parser, key forwarding
-state.go    per-loop UI state (prefix/resize/paste/copy modes)
-config/     tatami.conf loader + env overrides
-format/     human-readable slog handler ("text" log format)
-pane/       Pane, PTY + emulator, input/draw/clipboard helpers
-layout/     WindowManager: tree, splits, focus, drawing, resize
+main.go          thin launcher: logger + config, then app.New/Run
+internal/app/    App: tcell screen, event loop, key handling, cleanup
+config/          tatami.conf loader + env overrides
+format/          human-readable slog handler ("text" log format)
+term/            pure VT100/xterm emulator (grid, CSI, SGR, scrollback)
+pane/            Pane: PTY + emulator wiring, input/draw/clipboard helpers
+window/          workspace model: layout tree (Node), Window save slots, Registry
+layout/          WindowManager: tree splits, focus, drawing, resize, status bar
 ```
 
 See `DOCS.md` for the detailed control flow and concurrency model (the tcell

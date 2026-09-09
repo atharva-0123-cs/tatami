@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/atharva-0123-cs/tatami/pane"
+	"github.com/atharva-0123-cs/tatami/window"
 )
 
 // newWMWithPanes builds a Stacked (SplitHorizontal) tree of n zero-value panes
@@ -16,12 +17,12 @@ func newWMWithPanes(t *testing.T, n int) (*WindowManager, []*pane.Pane) {
 	t.Helper()
 	wm := NewWindowManager()
 	first := &pane.Pane{}
-	wm.root = &LayoutNode{Leaf: true, Pane: first}
+	wm.root = &window.Node{Leaf: true, Pane: first}
 	wm.focused = first
 	panes := []*pane.Pane{first}
 	for i := 1; i < n; i++ {
 		next := &pane.Pane{}
-		wm.splitCurrent(next, SplitHorizontal)
+		wm.splitCurrent(next, window.SplitHorizontal)
 		panes = append(panes, next)
 	}
 	return wm, panes
@@ -128,11 +129,11 @@ func TestSwapNext(t *testing.T) {
 func TestMoveFocusDirectional(t *testing.T) {
 	wm, panes := newWMWithPanes(t, 3)
 	wm.FocusPane(panes[0])
-	wm.MoveFocus(SplitHorizontal, 1)
+	wm.MoveFocus(window.SplitHorizontal, 1)
 	if wm.FocusedPane() != panes[1] {
 		t.Fatal("MoveFocus(+1) should move to the next stacked sibling")
 	}
-	wm.MoveFocus(SplitHorizontal, -1)
+	wm.MoveFocus(window.SplitHorizontal, -1)
 	if wm.FocusedPane() != panes[0] {
 		t.Fatal("MoveFocus(-1) should move back to the previous sibling")
 	}

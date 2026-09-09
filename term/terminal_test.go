@@ -1,4 +1,4 @@
-package pane
+package term
 
 import (
 	"strings"
@@ -7,14 +7,14 @@ import (
 
 // newTestTerm returns a ready-to-use 20x5 emulator in the default state, with
 // no respond callback (the tests never trigger DA/CPR replies).
-func newTestTerm() *terminal {
-	return newTerminal(20, 5, nil)
+func newTestTerm() *Terminal {
+	return New(20, 5, nil)
 }
 
 // feed feeds raw escape-sequence bytes into the emulator as one process chunk.
-func feed(t *testing.T, term *terminal, in string) {
+func feed(t *testing.T, term *Terminal, in string) {
 	t.Helper()
-	term.process([]byte(in))
+	term.Process([]byte(in))
 }
 
 // TestPutBasic checks that plain printable characters land in the grid at the
@@ -113,13 +113,13 @@ func TestWideChars(t *testing.T) {
 	term := newTestTerm()
 	feed(t, term, "\u4f60a") // CJK wide, then narrow
 	c0 := *term.at(0, 0)
-	if c0.ch != '\u4f60' {
-		t.Fatalf("cell0 = %q, want wide rune", c0.ch)
+	if c0.Ch != '\u4f60' {
+		t.Fatalf("cell0 = %q, want wide rune", c0.Ch)
 	}
-	if !term.at(1, 0).wide {
+	if !term.at(1, 0).Wide {
 		t.Fatal("continuation cell not marked wide")
 	}
-	if got := term.at(2, 0).ch; got != 'a' {
+	if got := term.at(2, 0).Ch; got != 'a' {
 		t.Fatalf("cell2 = %q, want %q", got, 'a')
 	}
 	if term.x != 3 {
@@ -133,13 +133,13 @@ func TestWideChars(t *testing.T) {
 // TestWideCharsWrapAtLastColumn checks that a wide rune at the last column
 // wraps to the next line (with wrap enabled) instead of corrupting cells.
 func TestWideCharsWrapAtLastColumn(t *testing.T) {
-	term := newTerminal(5, 3, nil)
+	term := New(5, 3, nil)
 	feed(t, term, "\x1b[5G") // cursor to last column (x=4)
 	feed(t, term, "\u4f60")
 	if term.y != 1 || term.x != 2 {
 		t.Fatalf("cursor = (%d,%d), want (2,1)", term.x, term.y)
 	}
-	if got := term.at(0, 1).ch; got != '\u4f60' {
+	if got := term.at(0, 1).Ch; got != '\u4f60' {
 		t.Fatalf("cell = %q, want wide rune", got)
 	}
 }
@@ -160,7 +160,7 @@ func TestCombiningMarksDropped(t *testing.T) {
 // TestScrollbackAndAllText verifies that lines scrolled off the top of a
 // full-screen main buffer enter scrollback and are included by allText.
 func TestScrollbackAndAllText(t *testing.T) {
-	term := newTerminal(5, 2, nil)
+	term := New(5, 2, nil)
 	feed(t, term, "123\r\n456\r\n7")
 	if got := term.allText(); got != "123\n456\n7" {
 		t.Fatalf("allText = %q, want %q", got, "123\n456\n7")
@@ -172,11 +172,11 @@ func TestScrollbackAndAllText(t *testing.T) {
 func TestSGRColors(t *testing.T) {
 	term := newTestTerm()
 	feed(t, term, "\x1b[38;5;196mX")
-	if c := *term.at(0, 0); c.fg.idx != 196 || c.ch != 'X' {
+	if c := *term.at(0, 0); c.Fg.Idx != 196 || c.Ch != 'X' {
 		t.Fatalf("cell = %+v, want fg idx 196 ch X", c)
 	}
 	feed(t, term, "\x1b[0mY")
-	if c := *term.at(1, 0); !c.fg.def || c.ch != 'Y' {
+	if c := *term.at(1, 0); !c.Fg.Def || c.Ch != 'Y' {
 		t.Fatalf("cell = %+v, want default fg reset", c)
 	}
 }
@@ -187,13 +187,13 @@ func TestSGRTruecolor(t *testing.T) {
 	term := newTestTerm()
 	feed(t, term, "\x1b[38;2;255;0;128mX")
 	c := *term.at(0, 0)
-	if c.fg.rgb != true || c.fg.r != 255 || c.fg.g != 0 || c.fg.b != 128 {
-		t.Fatalf("fg = %+v, want truecolor 255;0;128", c.fg)
+	if c.Fg.RGB != true || c.Fg.R != 255 || c.Fg.G != 0 || c.Fg.B != 128 {
+		t.Fatalf("fg = %+v, want truecolor 255;0;128", c.Fg)
 	}
 	feed(t, term, "\x1b[48;2;1;2;3mY")
 	c = *term.at(1, 0)
-	if c.bg.rgb != true || c.bg.r != 1 || c.bg.g != 2 || c.bg.b != 3 {
-		t.Fatalf("bg = %+v, want truecolor 1;2;3", c.bg)
+	if c.Bg.RGB != true || c.Bg.R != 1 || c.Bg.G != 2 || c.Bg.B != 3 {
+		t.Fatalf("bg = %+v, want truecolor 1;2;3", c.Bg)
 	}
 }
 
@@ -228,10 +228,10 @@ func TestScrollRegion(t *testing.T) {
 		t.Fatalf("dump = %q, want rows (empty/def/ghi)", term.dump())
 	}
 	// Row above the region must not accept the scrolled line.
-	if got := term.at(0, 0).ch; got != ' ' {
+	if got := term.at(0, 0).Ch; got != ' ' {
 		t.Fatalf("row 1 cell = %q, want space (outside region untouched)", got)
 	}
-	if got := term.at(0, 3).ch; got != ' ' {
+	if got := term.at(0, 3).Ch; got != ' ' {
 		t.Fatalf("bottom of region not cleared, got %q", got)
 	}
 }
@@ -278,19 +278,19 @@ func TestSGRDimItalicStrikethrough(t *testing.T) {
 	term := newTestTerm()
 	feed(t, term, "\x1b[2;3;9mX")
 	c := *term.at(0, 0)
-	if !c.dim || !c.italic || !c.strikethrough {
+	if !c.Dim || !c.Italic || !c.Strikethrough {
 		t.Fatalf("cell = %+v, want dim+italic+strike", c)
 	}
 	feed(t, term, "\x1b[22;23;29mY")
 	c = *term.at(1, 0)
-	if c.dim || c.italic || c.strikethrough {
+	if c.Dim || c.Italic || c.Strikethrough {
 		t.Fatalf("cell = %+v, want attributes cleared", c)
 	}
 	// SGR 0 resets everything at once.
 	feed(t, term, "\x1b[3;9mA")
 	feed(t, term, "\x1b[0mB")
 	c = *term.at(3, 0)
-	if c.dim || c.italic || c.strikethrough || c.bold {
+	if c.Dim || c.Italic || c.Strikethrough || c.Bold {
 		t.Fatalf("cell = %+v, want clean cell after SGR 0", c)
 	}
 }
@@ -299,11 +299,11 @@ func TestSGRDimItalicStrikethrough(t *testing.T) {
 // payload) is still parsed once the remainder arrives.
 func TestOSCTitlePartial(t *testing.T) {
 	term := newTestTerm()
-	term.process([]byte("\x1b]0;my tit"))
+	term.Process([]byte("\x1b]0;my tit"))
 	if term.Title() != "" {
 		t.Fatal("title should be empty until the terminator arrives")
 	}
-	term.process([]byte("le\x07"))
+	term.Process([]byte("le\x07"))
 	if got := term.Title(); got != "my title" {
 		t.Fatalf("title = %q, want %q", got, "my title")
 	}
@@ -313,7 +313,7 @@ func TestOSCTitlePartial(t *testing.T) {
 // last N scrollback lines visible above the live grid through viewRow, and
 // the offset is clamped to the scrollback depth.
 func TestScrollbackView(t *testing.T) {
-	term := newTerminal(5, 2, nil)
+	term := New(5, 2, nil)
 	feed(t, term, "one\r\ntwo\r\nthree\r\nfour")
 	if len(term.scrollback) != 2 {
 		t.Fatalf("scrollback = %d lines, want 2", len(term.scrollback))
@@ -327,11 +327,11 @@ func TestScrollbackView(t *testing.T) {
 	if got := lineText(term.viewRow(1)); got != "three" {
 		t.Fatalf("viewRow(1) = %q, want %q", got, "three")
 	}
-	if v := term.atView(0, 0); v.ch != 't' {
-		t.Fatalf("atView(0,0).ch = %q, want 't'", v.ch)
+	if v := term.atView(0, 0); v.Ch != 't' {
+		t.Fatalf("atView(0,0).Ch = %q, want 't'", v.Ch)
 	}
-	if v := term.atView(0, 1); v.ch != 't' {
-		t.Fatalf("atView(0,1).ch = %q, want 't'", v.ch)
+	if v := term.atView(0, 1); v.Ch != 't' {
+		t.Fatalf("atView(0,1).Ch = %q, want 't'", v.Ch)
 	}
 	// Clamps at the scrollback depth.
 	term.SetScrollOffset(99)
