@@ -9,13 +9,14 @@ package pane
 
 import (
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"os/exec"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/creack/pty"
 	"github.com/gdamore/tcell/v2"
 )
 
@@ -49,7 +50,8 @@ type Pane struct {
 	height  int
 	x0, y0  int
 	x1, y1  int
-	term    *terminal // emulated screen
+	term    *terminal    // emulated screen
+	lg      *slog.Logger // structured logger tagged with the pane id
 }
 
 // NewPane creates a new pane and starts a shell in a PTY.
@@ -68,11 +70,12 @@ func NewPane(label string) (*Pane, error) {
 		name: "pane-" + label,
 		done: make(chan struct{}),
 	}
+	p.lg = slog.With("pane", p.label())
 
 	cwd, err := os.Getwd()
 	if err != nil {
 		cwd = "/"
-		log.Printf("Warning: could not get working directory, defaulting to /: %v", err)
+		p.log().Warn("could not get working directory, defaulting to /", "err", err)
 	}
 
 	master, startCmd, err := spawnShell(cwd)
@@ -82,19 +85,22 @@ func NewPane(label string) (*Pane, error) {
 
 	p.pty = master
 	p.cmd = startCmd
-	p.term = newTerminal(80, 24, func(b []byte) {
+	p.term = newTerminal(120, 40, func(b []byte) {
 		_, _ = p.WriteInput(b)
 	})
+	p.ptyMtx.Lock()
+	_ = pty.Setsize(p.pty, &pty.Winsize{Rows: 40, Cols: 120})
+	p.ptyMtx.Unlock()
 
 	go p.readPtyOutput()
 	go func() {
 		err := p.cmd.Wait()
 		if err != nil && err.Error() != "signal: terminated" {
 			p.setDead(fmt.Sprintf("exited (%v)", err))
-			log.Printf("Pane %s process exited with: %v", p.label(), err)
+			p.log().Info("pane process exited", "err", err)
 		} else {
 			p.setDead("exited")
-			log.Printf("Pane %s process exited.", p.label())
+			p.log().Info("pane process exited")
 		}
 		close(p.done)
 	}()
@@ -104,6 +110,15 @@ func NewPane(label string) (*Pane, error) {
 
 // label returns the pane's display number (name without the "pane-" prefix).
 func (p *Pane) label() string { return strings.TrimPrefix(p.name, "pane-") }
+
+// log returns the pane's structured logger, falling back to the global logger
+// for panes constructed without one (e.g. zero-value panes in tests).
+func (p *Pane) log() *slog.Logger {
+	if p.lg == nil {
+		return slog.Default()
+	}
+	return p.lg
+}
 
 // MarkDead flags the pane as terminated without waking the UI. It is used by
 // tests and tooling to simulate a dead shell.
@@ -129,6 +144,37 @@ func (p *Pane) setDead(msg string) {
 // Name returns the pane's identifier.
 func (p *Pane) Name() string { return p.name }
 
+// Title returns the window title set by the shell via OSC 0/2, or "".
+func (p *Pane) Title() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.term == nil {
+		return ""
+	}
+	return p.term.Title()
+}
+
+// Scroll sets the copy-mode scroll offset (lines of scrollback shown above the
+// screen). A negative value is clamped to 0; an oversized value clamps to the
+// scrollback depth.
+func (p *Pane) Scroll(n int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.term != nil {
+		p.term.SetScrollOffset(n)
+	}
+}
+
+// ScrollOffset reports the current copy-mode scroll offset.
+func (p *Pane) ScrollOffset() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.term == nil {
+		return 0
+	}
+	return p.term.ScrollOffset()
+}
+
 // IsDead reports whether the underlying process has terminated.
 //
 // Set by the Wait goroutine (via setDead); the main loop polls this from
@@ -148,23 +194,23 @@ func (p *Pane) IsDead() bool {
 // idempotent with respect to a subsequent double-close because a closed PTY
 // fails subsequent writes/reads rather than panicking.
 func (p *Pane) Close() error {
-	log.Printf("Closing pane %s", p.label())
+	p.log().Info("closing pane")
 	if p.cmd != nil && p.cmd.Process != nil && !p.IsDead() {
 		if err := p.cmd.Process.Signal(os.Interrupt); err != nil {
-			log.Printf("Error sending interrupt to pane %s process: %v", p.label(), err)
+			p.log().Error("error sending interrupt to process", "err", err)
 			if err := p.cmd.Process.Kill(); err != nil {
-				log.Printf("Error killing pane %s process: %v", p.label(), err)
+				p.log().Error("error killing process", "err", err)
 			}
 		}
 		select {
 		case <-p.done:
 		case <-time.After(150 * time.Millisecond):
-			log.Printf("Warning: pane %s process did not exit within timeout, forcing PTY close", p.label())
+			p.log().Warn("process did not exit within timeout, forcing PTY close")
 		}
 	}
 	if p.pty != nil {
 		if err := p.pty.Close(); err != nil {
-			log.Printf("Error closing PTY for pane %s: %v", p.label(), err)
+			p.log().Error("error closing PTY", "err", err)
 			return err
 		}
 	}

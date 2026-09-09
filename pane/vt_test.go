@@ -252,3 +252,98 @@ func TestCursorVisibleMode(t *testing.T) {
 		t.Fatal("cursor should be visible after CSI ?25 h")
 	}
 }
+
+// TestOSCTitle verifies that OSC 0 and OSC 2 set the window title, and that
+// both BEL and ST terminators are accepted. Other OSC codes are ignored.
+func TestOSCTitle(t *testing.T) {
+	term := newTestTerm()
+	feed(t, term, "\x1b]0;my title\x07")
+	if got := term.Title(); got != "my title" {
+		t.Fatalf("title = %q, want %q", got, "my title")
+	}
+	feed(t, term, "\x1b]2;another\x1b\\")
+	if got := term.Title(); got != "another" {
+		t.Fatalf("title = %q, want %q", got, "another")
+	}
+	// Non-title OSC (7 = cwd) must not clobber the title.
+	feed(t, term, "\x1b]7;/home/user\x07")
+	if got := term.Title(); got != "another" {
+		t.Fatalf("title = %q, want %q", got, "another")
+	}
+}
+
+// TestSGRDimItalicStrikethrough verifies SGR 2 (dim), 3 (italic) and 9
+// (strikethrough) set the per-cell attributes and their resets clear them.
+func TestSGRDimItalicStrikethrough(t *testing.T) {
+	term := newTestTerm()
+	feed(t, term, "\x1b[2;3;9mX")
+	c := *term.at(0, 0)
+	if !c.dim || !c.italic || !c.strikethrough {
+		t.Fatalf("cell = %+v, want dim+italic+strike", c)
+	}
+	feed(t, term, "\x1b[22;23;29mY")
+	c = *term.at(1, 0)
+	if c.dim || c.italic || c.strikethrough {
+		t.Fatalf("cell = %+v, want attributes cleared", c)
+	}
+	// SGR 0 resets everything at once.
+	feed(t, term, "\x1b[3;9mA")
+	feed(t, term, "\x1b[0mB")
+	c = *term.at(3, 0)
+	if c.dim || c.italic || c.strikethrough || c.bold {
+		t.Fatalf("cell = %+v, want clean cell after SGR 0", c)
+	}
+}
+
+// TestOSCTitlePartial verifies that an OSC spanning two reads (split mid-
+// payload) is still parsed once the remainder arrives.
+func TestOSCTitlePartial(t *testing.T) {
+	term := newTestTerm()
+	term.process([]byte("\x1b]0;my tit"))
+	if term.Title() != "" {
+		t.Fatal("title should be empty until the terminator arrives")
+	}
+	term.process([]byte("le\x07"))
+	if got := term.Title(); got != "my title" {
+		t.Fatalf("title = %q, want %q", got, "my title")
+	}
+}
+
+// TestScrollbackView verifies copy-mode scrolling: SetScrollOffset makes the
+// last N scrollback lines visible above the live grid through viewRow, and
+// the offset is clamped to the scrollback depth.
+func TestScrollbackView(t *testing.T) {
+	term := newTerminal(5, 2, nil)
+	feed(t, term, "one\r\ntwo\r\nthree\r\nfour")
+	if len(term.scrollback) != 2 {
+		t.Fatalf("scrollback = %d lines, want 2", len(term.scrollback))
+	}
+	// Scroll back one line: the last scrollback line ("two") appears above the
+	// screen, and the bottom screen row ("four") scrolls out of view.
+	term.SetScrollOffset(1)
+	if got := lineText(term.viewRow(0)); got != "two" {
+		t.Fatalf("viewRow(0) = %q, want %q", got, "two")
+	}
+	if got := lineText(term.viewRow(1)); got != "three" {
+		t.Fatalf("viewRow(1) = %q, want %q", got, "three")
+	}
+	if v := term.atView(0, 0); v.ch != 't' {
+		t.Fatalf("atView(0,0).ch = %q, want 't'", v.ch)
+	}
+	if v := term.atView(0, 1); v.ch != 't' {
+		t.Fatalf("atView(0,1).ch = %q, want 't'", v.ch)
+	}
+	// Clamps at the scrollback depth.
+	term.SetScrollOffset(99)
+	if term.ScrollOffset() != len(term.scrollback) {
+		t.Fatalf("ScrollOffset = %d, want %d", term.ScrollOffset(), len(term.scrollback))
+	}
+	// Negative clamps to 0 (back to the live screen).
+	term.SetScrollOffset(-5)
+	if term.ScrollOffset() != 0 {
+		t.Fatalf("ScrollOffset = %d, want 0", term.ScrollOffset())
+	}
+	if got := term.viewRow(0); lineText(got) != "three" {
+		t.Fatalf("viewRow(0) at offset 0 = %q, want %q (live grid)", lineText(got), "three")
+	}
+}

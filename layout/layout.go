@@ -11,7 +11,9 @@
 package layout
 
 import (
-	"github.com/atharva-0123-cs/tview-demo/pane"
+	"fmt"
+
+	"github.com/atharva-0123-cs/tatami/pane"
 )
 
 // SplitDir represents the direction of a split.
@@ -29,12 +31,10 @@ const StatusBarHeight = 1
 // a container holds children arranged in one direction.
 //
 // Sibling rectangles within one container partition the container's rectangle
-// proportionally to their sizes, and each sibling after the first overlaps the
-// previous one by a single cell along the shared edge (seamSpans). That
-// overlap makes adjacent panes draw identical border cells on their touching
-// sides, so every internal boundary renders as one thin divider instead of two
-// parallel borders. Leaf nodes have a nil children/sizes slice; container nodes
-// have a nil Pane.
+// proportionally to their sizes (seamSpans). Each leaf insets its assigned
+// rectangle by the window's gap inset on every side when drawing, so adjacent
+// panes keep a thin visible gutter instead of touching borders. Leaf nodes have
+// a nil children/sizes slice; container nodes have a nil Pane.
 type LayoutNode struct {
 	Leaf   bool
 	Pane   *pane.Pane // non-nil only if Leaf
@@ -92,20 +92,63 @@ func (n *LayoutNode) ReplaceChild(oldChild, newChild *LayoutNode) {
 	}
 }
 
+// Window holds the saved layout state for a single window (workspace).
+// Only the active window's state lives directly on the WindowManager fields;
+// all windows have a matching entry in the windows slice (the active one at
+// currentWin) that acts as the save slot.
+type Window struct {
+	name      string
+	root      *LayoutNode
+	focused   *pane.Pane
+	paneCount int
+	zoomed    *pane.Pane
+}
+
 // WindowManager manages the tree of panes and positions them on the screen.
+// It supports multiple windows (workspaces); only one is active at a time.
+// The active window's state lives directly on the WindowManager fields
+// (root, focused, etc.) so all existing code works unchanged; the windows
+// slice holds one Window per window (the entry at currentWin mirrors the
+// active state and is refreshed on every switch).
 type WindowManager struct {
 	root      *LayoutNode
 	focused   *pane.Pane
 	paneCount int // monotonically increasing for unique labels
 	zoomed    *pane.Pane
+
+	windows    []*Window // one entry per window; active one at currentWin
+	currentWin int       // index of the active window in windows
+	windowName string    // name of the currently active window
+
+	gap     int // gutter (in cells) between adjacent panes, also the outer margin basis
+	inset   int // per-pane inset on every side (derived from gap)
+	overlap int // span overlap on shared split edges (derived from gap)
 }
 
 // NewWindowManager creates a new WindowManager.
 //
 // The tree starts empty; the initial pane is created lazily by Draw (or by the
-// caller calling NewPane directly).
+// caller calling NewPane directly). A default window "1" is created. The pane
+// gap defaults to one cell (see SetPaneGap).
 func NewWindowManager() *WindowManager {
-	return &WindowManager{}
+	wm := &WindowManager{
+		windows:    []*Window{{name: "1"}},
+		currentWin: 0,
+		windowName: "1",
+	}
+	wm.SetPaneGap(1)
+	return wm
+}
+
+// PaneGap returns the configured gutter width (in cells) between panes.
+func (wm *WindowManager) PaneGap() int { return wm.gap }
+
+// SetPaneGap configures the gutter between adjacent panes in cells (0 means
+// panes share a border). The per-pane inset and the shared-edge span overlap
+// are derived from it so the visible gutter lands exactly on the requested
+// width while the outer margin matches the inset.
+func (wm *WindowManager) SetPaneGap(g int) {
+	wm.gap, wm.inset, wm.overlap = gapGeometry(g)
 }
 
 // FocusedPane returns the currently focused pane, or nil.
@@ -159,6 +202,27 @@ func (wm *WindowManager) collectPanes() []*pane.Pane {
 // top-to-bottom reading order, so pane N lines up with the Nth split.
 func (wm *WindowManager) CollectPanes() []*pane.Pane { return wm.collectPanes() }
 
+// CollectAllPanes returns every leaf pane across all windows, in window
+// order then traversal order. Used at shutdown to close every PTY.
+func (wm *WindowManager) CollectAllPanes() []*pane.Pane {
+	var out []*pane.Pane
+	for i, w := range wm.windows {
+		root := w.root
+		if i == wm.currentWin {
+			root = wm.root
+		}
+		if root == nil {
+			continue
+		}
+		wm.walk(root, func(n *LayoutNode) {
+			if n.Leaf && n.Pane != nil {
+				out = append(out, n.Pane)
+			}
+		})
+	}
+	return out
+}
+
 // walk traverses the tree depth-first, calling fn on every node.
 //
 // A nil tree visits nothing; children are visited after their parent so callers
@@ -194,4 +258,135 @@ func (wm *WindowManager) childIndex(n *LayoutNode, child *LayoutNode) int {
 		}
 	}
 	return -1
+}
+
+// WindowCount returns the total number of windows.
+func (wm *WindowManager) WindowCount() int { return len(wm.windows) }
+
+// WindowIndex returns the 1-based index of the active window.
+func (wm *WindowManager) WindowIndex() int { return wm.currentWin + 1 }
+
+// WindowName returns the name of the active window.
+func (wm *WindowManager) WindowName() string { return wm.windowName }
+
+// WindowNames returns the names of all windows in order.
+func (wm *WindowManager) WindowNames() []string {
+	names := make([]string, len(wm.windows))
+	for i, w := range wm.windows {
+		names[i] = w.name
+	}
+	return names
+}
+
+// saveCurrent stores the active window's state into its save slot in the
+// windows slice.
+func (wm *WindowManager) saveCurrent() {
+	w := wm.windows[wm.currentWin]
+	w.root = wm.root
+	w.focused = wm.focused
+	w.paneCount = wm.paneCount
+	w.zoomed = wm.zoomed
+}
+
+// switchTo saves the active window, then activates the window at the given
+// index, restoring its layout state.
+func (wm *WindowManager) switchTo(idx int) {
+	if idx < 0 || idx >= len(wm.windows) {
+		return
+	}
+	wm.saveCurrent()
+	w := wm.windows[idx]
+	wm.root = w.root
+	wm.focused = w.focused
+	wm.paneCount = w.paneCount
+	wm.zoomed = w.zoomed
+	wm.windowName = w.name
+	wm.currentWin = idx
+}
+
+// NewWindow creates a new window after the current one and switches to it.
+//
+// The new window starts empty and is named one higher than the current
+// highest window number. A fresh pane is created for it immediately (both
+// horizontal and vertical splits now split that pane).
+func (wm *WindowManager) NewWindow() error {
+	wm.saveCurrent()
+
+	// Determine the next name: one above the highest existing number so
+	// names never collide even after windows are closed.
+	next := 1
+	for _, w := range wm.windows {
+		var n int
+		if _, err := fmt.Sscanf(w.name, "%d", &n); err == nil && n >= next {
+			next = n + 1
+		}
+	}
+
+	insertAt := wm.currentWin + 1
+	w := &Window{name: fmt.Sprintf("%d", next)}
+	wm.windows = append(wm.windows, nil)
+	copy(wm.windows[insertAt+1:], wm.windows[insertAt:])
+	wm.windows[insertAt] = w
+
+	// Switch to the new (empty) window.
+	wm.currentWin = insertAt
+	wm.windowName = w.name
+	wm.root = nil
+	wm.focused = nil
+	wm.zoomed = nil
+	wm.paneCount = 0
+
+	// Create the initial pane for the new window.
+	if err := wm.NewPane(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// NextWindow switches to the next window (wrapping around). No-op when there
+// is only one window.
+func (wm *WindowManager) NextWindow() {
+	if len(wm.windows) <= 1 {
+		return
+	}
+	wm.switchTo((wm.currentWin + 1) % len(wm.windows))
+}
+
+// PrevWindow switches to the previous window (wrapping around).
+func (wm *WindowManager) PrevWindow() {
+	if len(wm.windows) <= 1 {
+		return
+	}
+	wm.switchTo((wm.currentWin - 1 + len(wm.windows)) % len(wm.windows))
+}
+
+// windowGone removes the (now empty) active window and switches to a
+// neighbor. It returns true when no windows are left (the app should quit).
+//
+// Called by closeLeaf when the last pane in the active window is closed.
+func (wm *WindowManager) windowGone() bool {
+	if len(wm.windows) == 1 {
+		wm.root = nil
+		wm.focused = nil
+		wm.zoomed = nil
+		return true
+	}
+	idx := wm.currentWin
+	wm.windows = append(wm.windows[:idx], wm.windows[idx+1:]...)
+	wm.root = nil
+	wm.focused = nil
+	wm.zoomed = nil
+	wm.paneCount = 0
+
+	if idx >= len(wm.windows) {
+		idx = len(wm.windows) - 1
+	}
+	w := wm.windows[idx]
+	wm.root = w.root
+	wm.focused = w.focused
+	wm.paneCount = w.paneCount
+	wm.zoomed = w.zoomed
+	wm.windowName = w.name
+	wm.currentWin = idx
+	return false
 }

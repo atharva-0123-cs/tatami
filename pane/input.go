@@ -5,7 +5,6 @@ package pane
 
 import (
 	"fmt"
-	"log"
 	"strings"
 
 	"github.com/gdamore/tcell/v2"
@@ -21,7 +20,7 @@ func (p *Pane) HandleEvent(ev *tcell.EventKey) bool {
 	data := p.KeyToBytes(ev)
 	if len(data) > 0 {
 		if _, err := p.WriteInput(data); err != nil {
-			log.Printf("Error writing input to PTY for pane %s: %v", p.label(), err)
+			p.log().Error("error writing keystroke to pty", "err", err)
 		}
 		return true
 	}

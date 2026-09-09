@@ -55,12 +55,15 @@ func colorRGB(r, g, b int) vtColor { return vtColor{rgb: true, r: r, g: g, b: b}
 
 // vtCell is one screen cell.
 type vtCell struct {
-	ch        rune
-	fg, bg    vtColor
-	bold      bool
-	underline bool
-	reverse   bool
-	wide      bool // continuation cell of a double-width rune to the left
+	ch            rune
+	fg, bg        vtColor
+	bold          bool
+	dim           bool
+	italic        bool
+	underline     bool
+	reverse       bool
+	strikethrough bool
+	wide          bool // continuation cell of a double-width rune to the left
 }
 
 // blankCell returns the default empty cell (space, default colors).
@@ -88,8 +91,10 @@ type terminal struct {
 	sx, sy     int // saved cursor (ESC 7 / CSI s) in the active buffer
 	msx, msy   int // main-buffer cursor stashed while alt screen is active
 
-	fg, bg               vtColor
-	bold, underline, rev bool
+	fg, bg            vtColor
+	bold, dim, italic bool
+	underline, rev    bool
+	strikethrough     bool
 
 	top, bot int // scroll region, 0-based inclusive
 	wrap     bool
@@ -108,9 +113,11 @@ type terminal struct {
 
 	scrollback  [][]vtCell // main-buffer lines scrolled off the top
 	scrollCap   int
+	scrollOff   int  // lines of scrollback viewable above the screen (copy mode)
 	lastGraphic rune // for CSI REP (b)
 	pending     []byte
 	respond     func([]byte) // sends bytes back to the PTY (CPR/DA replies)
+	title       string       // window title set via OSC 0/2
 }
 
 // newTerminal allocates a cols×rows screen in the default state, with respond
@@ -211,10 +218,11 @@ func (t *terminal) reset() {
 	t.alt, t.altOn = nil, false
 	t.x, t.y, t.sx, t.sy, t.msx, t.msy = 0, 0, 0, 0, 0, 0
 	t.fg, t.bg = colorDefault(), colorDefault()
-	t.bold, t.underline, t.rev = false, false, false
+	t.bold, t.dim, t.italic, t.underline, t.rev, t.strikethrough = false, false, false, false, false, false
 	t.top, t.bot = 0, t.rows-1
 	t.wrap, t.decckm, t.cursorVisible = true, false, true
 	t.bracketedPaste = false
+	t.title = ""
 	t.g0, t.g1, t.gShifted = 0, 0, false
 	t.resetTabs()
 }
@@ -344,7 +352,7 @@ func (t *terminal) put(r rune) {
 		return
 	}
 	c := t.at(t.x, t.y)
-	*c = vtCell{ch: r, fg: t.fg, bg: t.bg, bold: t.bold, underline: t.underline, reverse: t.rev}
+	*c = vtCell{ch: r, fg: t.fg, bg: t.bg, bold: t.bold, dim: t.dim, italic: t.italic, underline: t.underline, reverse: t.rev, strikethrough: t.strikethrough}
 	t.x++
 }
 
@@ -370,7 +378,7 @@ func (t *terminal) putWide(r rune) {
 		}
 	}
 	c := t.at(t.x, t.y)
-	*c = vtCell{ch: r, fg: t.fg, bg: t.bg, bold: t.bold, underline: t.underline, reverse: t.rev}
+	*c = vtCell{ch: r, fg: t.fg, bg: t.bg, bold: t.bold, dim: t.dim, italic: t.italic, underline: t.underline, reverse: t.rev, strikethrough: t.strikethrough}
 	if t.x+1 < t.cols {
 		*t.at(t.x+1, t.y) = vtCell{ch: ' ', wide: true}
 	}
@@ -467,6 +475,10 @@ func (t *terminal) pushScrollback(row []vtCell) {
 	if len(t.scrollback) > t.scrollCap {
 		t.scrollback = t.scrollback[len(t.scrollback)-t.scrollCap:]
 	}
+	// Keep the copy-mode view offset valid as lines scroll away.
+	if t.scrollOff > len(t.scrollback) {
+		t.scrollOff = len(t.scrollback)
+	}
 }
 
 // ------------------------------------------------------------- sequences ---
@@ -488,7 +500,7 @@ func (t *terminal) parseEscape(buf []byte) int {
 	case '[':
 		return t.parseCSI(buf)
 	case ']':
-		return consumeVTOSC(buf)
+		return t.consumeVTOSC(buf)
 	case 'P', 'X', '^', '_':
 		return consumeVTST(buf)
 	case '(', ')':
@@ -727,7 +739,7 @@ func pn(nums []int, i, def int) int {
 func (t *terminal) sgr(nums []int) {
 	if len(nums) == 0 {
 		t.fg, t.bg = colorDefault(), colorDefault()
-		t.bold, t.underline, t.rev = false, false, false
+		t.bold, t.dim, t.italic, t.underline, t.rev, t.strikethrough = false, false, false, false, false, false
 		return
 	}
 	for i := 0; i < len(nums); i++ {
@@ -738,19 +750,30 @@ func (t *terminal) sgr(nums []int) {
 		switch {
 		case n == 0:
 			t.fg, t.bg = colorDefault(), colorDefault()
-			t.bold, t.underline, t.rev = false, false, false
+			t.bold, t.dim, t.italic, t.underline, t.rev, t.strikethrough = false, false, false, false, false, false
 		case n == 1:
 			t.bold = true
+		case n == 2:
+			t.dim = true
+		case n == 3:
+			t.italic = true
 		case n == 4:
 			t.underline = true
 		case n == 7:
 			t.rev = true
+		case n == 9:
+			t.strikethrough = true
 		case n == 22:
 			t.bold = false
+			t.dim = false
+		case n == 23:
+			t.italic = false
 		case n == 24:
 			t.underline = false
 		case n == 27:
 			t.rev = false
+		case n == 29:
+			t.strikethrough = false
 		case n >= 30 && n <= 37:
 			t.fg = colorIndex(n - 30)
 		case n == 39:
@@ -793,7 +816,7 @@ func (t *terminal) sgr(nums []int) {
 				i++
 			}
 		default:
-			// 2 (dim), 3 (italic), 5/6 (blink), 8/9, 28, 53, ...: ignore.
+			// 5/6 (blink), 8 (hidden), 53 (overline), ...: ignore.
 		}
 	}
 }
@@ -1014,6 +1037,53 @@ func (t *terminal) eraseChars(n int) {
 
 // ------------------------------------------------------------- reading -----
 
+// SetScrollOffset sets the copy-mode view offset: how many scrollback lines
+// are shown above the screen. Clamped to [0, len(scrollback)]. A zero offset
+// shows the live screen.
+func (t *terminal) SetScrollOffset(n int) {
+	if n < 0 {
+		n = 0
+	}
+	if n > len(t.scrollback) {
+		n = len(t.scrollback)
+	}
+	t.scrollOff = n
+}
+
+// ScrollOffset returns the current copy-mode view offset.
+func (t *terminal) ScrollOffset() int { return t.scrollOff }
+
+// viewRowCount returns how many rows are visible in the current view
+// (scrollback lines scrolled in plus the live grid rows).
+func (t *terminal) viewRowCount() int {
+	n := t.scrollOff + t.rows
+	if n > len(t.scrollback)+t.rows {
+		n = len(t.scrollback) + t.rows
+	}
+	return n
+}
+
+// viewRow returns the vtCell row visible at view row yy (0 = first visible).
+//
+// Rows from the scrollback fill the top of the view (newest scrollback line
+// sits just above the live grid); once the scrollback window is exhausted the
+// live grid rows follow.
+func (t *terminal) viewRow(yy int) []vtCell {
+	if yy < t.scrollOff {
+		return t.scrollback[len(t.scrollback)-t.scrollOff+yy]
+	}
+	return t.gridRow(yy - t.scrollOff)
+}
+
+// atView returns the cell at view coordinates (xx, yy), where yy counts from
+// the top of the scrolled view.
+func (t *terminal) atView(xx, yy int) *vtCell {
+	if yy < t.scrollOff {
+		return &t.scrollback[len(t.scrollback)-t.scrollOff+yy][xx]
+	}
+	return t.at(xx, yy-t.scrollOff)
+}
+
 // lineText renders one stored line as plain text without trailing blanks.
 //
 // NUL cells render as spaces; trailing spaces are trimmed so that joined lines
@@ -1078,11 +1148,18 @@ func (t *terminal) dump() string {
 // consumeVTOSC consumes "ESC ] ... (BEL | ESC \)".
 //
 // OSC payloads (title, clipboard, hyperlinks, OSC133 shell integration) are
-// opaque to the emulator and skipped up to their terminator; returns the
-// number of bytes consumed, or -1 when the terminating byte has not arrived yet.
-func consumeVTOSC(buf []byte) int {
+// parsed when they carry a title (OSC 0/2); other payloads are consumed and
+// discarded. Returns the number of bytes consumed, or -1 when the terminating
+// byte has not arrived yet.
+func (t *terminal) consumeVTOSC(buf []byte) int {
+	// Find the payload between ']' and the terminator (BEL or ST).
+	payloadStart := -1
 	for i := 2; i < len(buf); i++ {
 		if buf[i] == 0x07 {
+			// BEL terminates the OSC.
+			if payloadStart >= 0 {
+				t.handleOSC(buf[payloadStart:i])
+			}
 			return i + 1
 		}
 		if buf[i] == 0x1b {
@@ -1090,12 +1167,45 @@ func consumeVTOSC(buf []byte) int {
 				return -1
 			}
 			if buf[i+1] == '\\' {
+				// ST terminates the OSC.
+				if payloadStart >= 0 {
+					t.handleOSC(buf[payloadStart:i])
+				}
 				return i + 2
 			}
+		}
+		if payloadStart < 0 {
+			payloadStart = i
 		}
 	}
 	return -1
 }
+
+// handleOSC processes the payload of an OSC sequence. OSC 0 and OSC 2 set
+// the window title; all other OSC codes are ignored.
+func (t *terminal) handleOSC(payload []byte) {
+	s := string(payload)
+	// OSC codes are "N;text" where N is the code number.
+	semi := -1
+	for i, c := range s {
+		if c == ';' {
+			semi = i
+			break
+		}
+	}
+	if semi < 0 {
+		return
+	}
+	code := s[:semi]
+	title := s[semi+1:]
+	switch code {
+	case "0", "2":
+		t.title = title
+	}
+}
+
+// Title returns the window title set by the shell via OSC 0/2.
+func (t *terminal) Title() string { return t.title }
 
 // consumeVTST consumes DCS/SOS/PM/APC up to ST or BEL.
 //

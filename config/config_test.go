@@ -81,18 +81,33 @@ func TestParseColor(t *testing.T) {
 	}
 }
 
-// TestLoadFile exercises file resolution through ROGE_CONFIG and key parsing,
+// TestParsePaneGap accepts cell counts within range and rejects bad values.
+func TestParsePaneGap(t *testing.T) {
+	for _, ok := range []string{"0", "1", "8"} {
+		if v, err := parsePaneGap(ok); err != nil || v < 0 || v > 8 {
+			t.Fatalf("parsePaneGap(%q) = %d, %v; want in range", ok, v, err)
+		}
+	}
+	for _, bad := range []string{"-1", "9", "one", ""} {
+		if _, err := parsePaneGap(bad); err == nil {
+			t.Fatalf("parsePaneGap(%q) should fail", bad)
+		}
+	}
+}
+
+// TestLoadFile exercises file resolution through TATAMI_CONFIG and key parsing,
 // including comments, blank lines and unknown keys.
 func TestLoadFile(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "roge.conf")
-	content := "# roge demo config\n\nprefix = ctrl-b\nmouse = on\nstatus_bg = #101418\nstatus_fg = 250\ndefault = ignored\n"
+	path := filepath.Join(dir, "tatami.conf")
+	content := "# tatami demo config\n\nprefix = ctrl-b\nmouse = on\nstatus_bg = #101418\nstatus_fg = 250\npane_gap = 2\ndefault = ignored\n"
 	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("ROGE_CONFIG", path)
-	t.Setenv("ROGE_PREFIX", "")
-	t.Setenv("ROGE_MOUSE", "")
+	t.Setenv("TATAMI_CONFIG", path)
+	t.Setenv("TATAMI_PREFIX", "")
+	t.Setenv("TATAMI_MOUSE", "")
+	t.Setenv("TATAMI_PANE_GAP", "")
 
 	cfg := Load()
 	if cfg.PrefixKey != tcell.KeyCtrlB || cfg.PrefixLabel != "Ctrl-B" {
@@ -107,24 +122,31 @@ func TestLoadFile(t *testing.T) {
 	if cfg.StatusBg != tcell.NewRGBColor(0x10, 0x14, 0x18) {
 		t.Fatalf("status_bg = %v, want #101418", cfg.StatusBg)
 	}
+	if cfg.PaneGap != 2 {
+		t.Fatalf("pane_gap = %d, want 2", cfg.PaneGap)
+	}
 }
 
-// TestLoadEnvOverrides verifies ROGE_<NAME> wins over the file.
+// TestLoadEnvOverrides verifies TATAMI_<NAME> wins over the file.
 func TestLoadEnvOverrides(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "roge.conf")
-	if err := os.WriteFile(path, []byte("prefix = ctrl-a\nmouse = off\n"), 0644); err != nil {
+	path := filepath.Join(dir, "tatami.conf")
+	if err := os.WriteFile(path, []byte("prefix = ctrl-a\nmouse = off\npane_gap = 1\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("ROGE_CONFIG", path)
-	t.Setenv("ROGE_PREFIX", "ctrl-c")
-	t.Setenv("ROGE_MOUSE", "true")
+	t.Setenv("TATAMI_CONFIG", path)
+	t.Setenv("TATAMI_PREFIX", "ctrl-c")
+	t.Setenv("TATAMI_MOUSE", "true")
+	t.Setenv("TATAMI_PANE_GAP", "4")
 
 	cfg := Load()
 	if cfg.PrefixKey != tcell.KeyCtrlC {
 		t.Fatalf("prefix = %v, want Ctrl-C", cfg.PrefixKey)
 	}
 	if !cfg.Mouse {
-		t.Fatal("env ROGE_MOUSE should override the file")
+		t.Fatal("env TATAMI_MOUSE should override the file")
+	}
+	if cfg.PaneGap != 4 {
+		t.Fatalf("pane_gap = %d, want 4 (env override)", cfg.PaneGap)
 	}
 }

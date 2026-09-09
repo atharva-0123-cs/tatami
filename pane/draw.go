@@ -4,7 +4,6 @@ package pane
 
 import (
 	"fmt"
-	"log"
 
 	"github.com/creack/pty"
 	"github.com/gdamore/tcell/v2"
@@ -44,7 +43,7 @@ func (p *Pane) Draw(x0, y0, x1, y1 int, isFocused bool, screen tcell.Screen) (cx
 		p.ptyMtx.Lock()
 		if p.pty != nil {
 			if err := pty.Setsize(p.pty, &pty.Winsize{Rows: uint16(h), Cols: uint16(w)}); err != nil {
-				log.Printf("Error setting PTY size for pane %s: %v", p.label(), err)
+				p.log().Error("pty resize failed", "cols", w, "rows", h, "err", err)
 			}
 		}
 		p.ptyMtx.Unlock()
@@ -73,6 +72,25 @@ func (p *Pane) Draw(x0, y0, x1, y1 int, isFocused bool, screen tcell.Screen) (cx
 		screen.SetContent(x1-1, y, '│', nil, borderStyle)
 	}
 
+	// Show window title in the top border when available. p.mu is already held
+	// (we are inside Draw), so read the title directly from p.term instead of
+	// calling the locking accessor Pane.Title to avoid a self-deadlock.
+	if title := p.term.Title(); title != "" && len(title)+4 < x1-x0-2 {
+		titleRunes := []rune(title)
+		maxTitle := x1 - x0 - 4
+		if len(titleRunes) > maxTitle {
+			titleRunes = titleRunes[:maxTitle]
+		}
+		titleStyle := borderStyle
+		if !isFocused {
+			titleStyle = tcell.StyleDefault.Foreground(tcell.ColorDefault)
+		}
+		titleStart := x0 + 2
+		for i, r := range titleRunes {
+			screen.SetContent(titleStart+i, y0, r, nil, titleStyle)
+		}
+	}
+
 	if p.dead {
 		title := " dead "
 		if p.exitMsg != "" {
@@ -89,9 +107,13 @@ func (p *Pane) Draw(x0, y0, x1, y1 int, isFocused bool, screen tcell.Screen) (cx
 	innerX := x0 + 1
 	innerY := y0 + 1
 
-	for y := 0; y < h && y < p.term.rows; y++ {
+	// In copy mode the grid may be scrolled back; if so, render the view rows
+	// (scrollback window above the live grid) and hide the cursor.
+	viewRows := p.term.scrollOff
+	for y := 0; y < h && y < p.term.rows+viewRows; y++ {
+		row := p.term.viewRow(y)
 		for x := 0; x < w && x < p.term.cols; x++ {
-			c := *p.term.at(x, y)
+			c := row[x]
 			if c.wide {
 				continue // right half of a double-width rune drawn at x-1
 			}
@@ -103,7 +125,7 @@ func (p *Pane) Draw(x0, y0, x1, y1 int, isFocused bool, screen tcell.Screen) (cx
 		}
 	}
 
-	if isFocused && p.term.cursorVisible {
+	if isFocused && viewRows == 0 && p.term.cursorVisible {
 		cx = innerX + p.term.x
 		cy = innerY + p.term.y
 		if cx >= innerX && cx < innerX+w && cy >= innerY && cy < innerY+h {
@@ -145,8 +167,17 @@ func cellToStyle(c vtCell) tcell.Style {
 	if c.bold {
 		st = st.Bold(true)
 	}
+	if c.dim {
+		st = st.Dim(true)
+	}
+	if c.italic {
+		st = st.Italic(true)
+	}
 	if c.underline {
 		st = st.Underline(true)
+	}
+	if c.strikethrough {
+		st = st.StrikeThrough(true)
 	}
 	return st
 }

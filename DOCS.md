@@ -1,6 +1,4 @@
-# DOCS.md — Control flow
-
-`roge` is a terminal multiplexer: each pane runs a real shell in a PTY, and a
+`tatami` is a agentic terminal multiplexer: each pane runs a shell in a PTY, and a
 small VT emulator decodes the shell's output into a cell grid that is drawn
 straight into the tcell screen buffer. There is one OS thread for the UI loop
 and one goroutine per pane reading PTY output.
@@ -10,7 +8,7 @@ and one goroutine per pane reading PTY output.
 ```text
 main() [main goroutine]
   |
-  +-- 1. open roge.log, log.SetOutput
+  +-- 1. open tatami.log, install slog handler (setupLogger: text | json)
   +-- 2. tcell.NewScreen + screen.Init, screen.EnablePaste()
   +-- 3. install pane.Interrupt = screen.PostEvent(EventInterrupt)
   +-- 4. layout.NewWindowManager
@@ -57,7 +55,11 @@ background goroutines (one set per pane):
 
 ## 1. Startup (`main.go`)
 
-1. Open `roge.log`, redirect the process logger to it.
+1. Open `tatami.log`, install the global slog handler via `setupLogger`
+   (two-phase: defaults first so config warnings are captured, then the loaded
+   profile; `text` renders `[LEVEL] time file:line : message`, `json` is the
+   structured alternative). Every record carries `app`, `version` and a per-run
+   `run` correlation ID.
 2. `tcell.NewScreen()` + `screen.Init()` — requires a real TTY; fails if stdin
    is not a TTY.
 3. `screen.EnablePaste()` so bracketed-paste sequences become `EventPaste`.
@@ -97,9 +99,10 @@ Returns `true` when the multiplexer consumes the event, `false` to forward.
 3. **Resize mode:** one `h/j/k/l` adjusts the focused pane's size
    (`wm.DecreaseSize`/`IncreaseSize`), drawing ends the mode.
 4. **Prefix mode:** `1-9` jumps by pane index; `c`/`-` h-split, `C`/`|`
-   v-split, `x` closes (last pane → `shouldQuit = true`), `h/j/k/l` focus,
-   `z` zoom toggle, `o` rotate, `{`/`}` swap, `r` enters resize mode,
-   `q` quits; arrows move focus. Letter commands only match `KeyRune` events
+   v-split, `n` new window, `w` next window, `W`/`p` previous window, `x`
+   closes (last window → `shouldQuit = true`), `h/j/k/l` focus, `z` zoom
+   toggle, `o` rotate, `{`/`}` swap, `r` enters resize mode, `q` quits;
+   arrows move focus. Letter commands only match `KeyRune` events
    (unmodified characters), so Ctrl+letter and function keys simply end the
    prefix mode — matching how termbox reported `Ch == 0` for them.
 5. **Default:** return false → key forwarded to the focused shell.

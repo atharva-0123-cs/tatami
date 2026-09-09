@@ -1,24 +1,21 @@
-// Package config loads roge's runtime configuration ("roge.conf") and applies
-// environment overrides on top of it.
+// Package config loads tatami's runtime configuration ("tatami.conf") and
+// applies environment overrides on top of it.
 //
 // The file format is one `key = value` pair per line; blank lines and lines
 // beginning with '#' are ignored. The file is looked up in order of priority:
 //
-//  1. the path in the ROGE_CONFIG environment variable, if set,
-//  2. ./roge.conf in the working directory,
-//  3. $XDG_CONFIG_HOME/roge/roge.conf (or ~/.config/roge/roge.conf when
-//     XDG_CONFIG_HOME is unset).
+//  1. the path in the TATAMI_CONFIG environment variable, if set,
+//  2. ./tatami.conf in the working directory,
+//  3. $XDG_CONFIG_HOME/tatami/tatami.conf (or ~/.config/tatami/tatami.conf
+//     when XDG_CONFIG_HOME is unset).
 //
-// For every field, the ROGE_<NAME> environment variable overrides the file
-// value (e.g. ROGE_PREFIX, ROGE_MOUSE). Unknown keys or malformed values are
-// logged and the default is kept, so a broken config never prevents roge from
-// starting.
+
 package config
 
 import (
 	"bufio"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -34,6 +31,9 @@ type Config struct {
 	Mouse       bool      // enables click-focus, seam-drag resize and wheel scroll
 	StatusFg    tcell.Color
 	StatusBg    tcell.Color
+	LogLevel    slog.Level // minimum log level emitted to the log file
+	LogFormat   string     // "text" (default: "[LEVEL] time file:line : message") or "json"
+	PaneGap     int        // gutter between adjacent panes, in cells (default 1)
 }
 
 // defaultConfig returns the built-in settings used when no config file or
@@ -45,6 +45,9 @@ func defaultConfig() *Config {
 		Mouse:       false,
 		StatusFg:    tcell.PaletteColor(252) | tcell.ColorValid,
 		StatusBg:    tcell.PaletteColor(235) | tcell.ColorValid,
+		LogLevel:    slog.LevelInfo,
+		LogFormat:   "text",
+		PaneGap:     1,
 	}
 }
 
@@ -61,11 +64,11 @@ func Load() *Config {
 
 // findPath resolves the config file location, or "" when none exists.
 func findPath() string {
-	if p := os.Getenv("ROGE_CONFIG"); p != "" {
+	if p := os.Getenv("TATAMI_CONFIG"); p != "" {
 		return p
 	}
-	if _, err := os.Stat("roge.conf"); err == nil {
-		return "roge.conf"
+	if _, err := os.Stat("tatami.conf"); err == nil {
+		return "tatami.conf"
 	}
 	dir := os.Getenv("XDG_CONFIG_HOME")
 	if dir == "" {
@@ -75,19 +78,19 @@ func findPath() string {
 		}
 		dir = filepath.Join(home, ".config")
 	}
-	p := filepath.Join(dir, "roge", "roge.conf")
+	p := filepath.Join(dir, "tatami", "tatami.conf")
 	if _, err := os.Stat(p); err == nil {
 		return p
 	}
 	return ""
 }
 
-// applyFile parses a roge.conf file and applies every recognized key,
+// applyFile parses a tatami.conf file and applies every recognized key,
 // keeping the default for unknown or malformed values.
 func (c *Config) applyFile(path string) {
 	f, err := os.Open(path)
 	if err != nil {
-		log.Printf("config: cannot open %s: %v", path, err)
+		slog.Warn("config: cannot open file", "path", path, "err", err)
 		return
 	}
 	defer f.Close()
@@ -100,30 +103,51 @@ func (c *Config) applyFile(path string) {
 		}
 		eq := strings.IndexByte(line, '=')
 		if eq < 0 {
-			log.Printf("config: ignoring line without '=': %q", line)
+			slog.Warn("config: ignoring line without '='", "line", line)
 			continue
 		}
 		c.set(strings.TrimSpace(line[:eq]), strings.TrimSpace(line[eq+1:]))
 	}
 	if err := sc.Err(); err != nil {
-		log.Printf("config: reading %s: %v", path, err)
+		slog.Warn("config: reading failed", "path", path, "err", err)
 	}
 }
 
-// applyEnv applies the ROGE_<NAME> environment overrides on top of the file.
+// applyEnv applies the TATAMI_<NAME> environment overrides on top of the file.
 func (c *Config) applyEnv() {
-	if v := os.Getenv("ROGE_PREFIX"); v != "" {
+	if v := os.Getenv("TATAMI_PREFIX"); v != "" {
 		if key, label, err := parsePrefix(v); err == nil {
 			c.PrefixKey, c.PrefixLabel = key, label
 		} else {
-			log.Printf("config: ROGE_PREFIX: %v", err)
+			slog.Warn("config: invalid TATAMI_PREFIX", "err", err)
 		}
 	}
-	if v := os.Getenv("ROGE_MOUSE"); v != "" {
+	if v := os.Getenv("TATAMI_MOUSE"); v != "" {
 		if b, err := parseBool(v); err == nil {
 			c.Mouse = b
 		} else {
-			log.Printf("config: ROGE_MOUSE: %v", err)
+			slog.Warn("config: invalid TATAMI_MOUSE", "err", err)
+		}
+	}
+	if v := os.Getenv("TATAMI_LOG_LEVEL"); v != "" {
+		if lvl, err := parseLogLevel(v); err == nil {
+			c.LogLevel = lvl
+		} else {
+			slog.Warn("config: invalid TATAMI_LOG_LEVEL", "err", err)
+		}
+	}
+	if v := os.Getenv("TATAMI_LOG_FORMAT"); v != "" {
+		if f, err := parseLogFormat(v); err == nil {
+			c.LogFormat = f
+		} else {
+			slog.Warn("config: invalid TATAMI_LOG_FORMAT", "err", err)
+		}
+	}
+	if v := os.Getenv("TATAMI_PANE_GAP"); v != "" {
+		if g, err := parsePaneGap(v); err == nil {
+			c.PaneGap = g
+		} else {
+			slog.Warn("config: invalid TATAMI_PANE_GAP", "err", err)
 		}
 	}
 }
@@ -136,28 +160,46 @@ func (c *Config) set(key, value string) {
 		if k, label, err := parsePrefix(value); err == nil {
 			c.PrefixKey, c.PrefixLabel = k, label
 		} else {
-			log.Printf("config: prefix: %v", err)
+			slog.Warn("config: invalid prefix", "value", value, "err", err)
 		}
 	case "mouse":
 		if b, err := parseBool(value); err == nil {
 			c.Mouse = b
 		} else {
-			log.Printf("config: mouse: %v", err)
+			slog.Warn("config: invalid mouse", "value", value, "err", err)
 		}
 	case "status_bg":
 		if col, err := parseColor(value); err == nil {
 			c.StatusBg = col
 		} else {
-			log.Printf("config: status_bg: %v", err)
+			slog.Warn("config: invalid status_bg", "value", value, "err", err)
 		}
 	case "status_fg":
 		if col, err := parseColor(value); err == nil {
 			c.StatusFg = col
 		} else {
-			log.Printf("config: status_fg: %v", err)
+			slog.Warn("config: invalid status_fg", "value", value, "err", err)
+		}
+	case "log_level":
+		if lvl, err := parseLogLevel(value); err == nil {
+			c.LogLevel = lvl
+		} else {
+			slog.Warn("config: invalid log_level", "value", value, "err", err)
+		}
+	case "log_format":
+		if f, err := parseLogFormat(value); err == nil {
+			c.LogFormat = f
+		} else {
+			slog.Warn("config: invalid log_format", "value", value, "err", err)
+		}
+	case "pane_gap":
+		if g, err := parsePaneGap(value); err == nil {
+			c.PaneGap = g
+		} else {
+			slog.Warn("config: invalid pane_gap", "value", value, "err", err)
 		}
 	default:
-		log.Printf("config: ignoring unknown key %q", key)
+		slog.Warn("config: ignoring unknown key", "key", key)
 	}
 }
 
@@ -222,4 +264,44 @@ func parseBool(s string) (bool, error) {
 	default:
 		return false, fmt.Errorf("invalid boolean %q (use on/off)", s)
 	}
+}
+
+// parseLogLevel parses a log level token ("debug", "info", "warn", "error").
+func parseLogLevel(s string) (slog.Level, error) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "debug":
+		return slog.LevelDebug, nil
+	case "info":
+		return slog.LevelInfo, nil
+	case "warn", "warning":
+		return slog.LevelWarn, nil
+	case "error":
+		return slog.LevelError, nil
+	default:
+		return 0, fmt.Errorf("invalid log level %q (use debug/info/warn/error)", s)
+	}
+}
+
+// parseLogFormat parses a log output format ("text" or "json").
+func parseLogFormat(s string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "text":
+		return "text", nil
+	case "json":
+		return "json", nil
+	}
+	return "", fmt.Errorf("invalid log format %q (use text/json)", s)
+}
+
+// parsePaneGap parses a pane gutter width in cells, clamped to 0..8 (0 makes
+// adjacent panes share a border).
+func parsePaneGap(s string) (int, error) {
+	g, err := strconv.Atoi(strings.TrimSpace(s))
+	if err != nil {
+		return 0, fmt.Errorf("invalid pane gap %q (use 0-8 cells)", s)
+	}
+	if g < 0 || g > 8 {
+		return 0, fmt.Errorf("pane gap %d out of range (use 0-8 cells)", g)
+	}
+	return g, nil
 }

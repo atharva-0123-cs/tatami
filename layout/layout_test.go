@@ -3,7 +3,7 @@ package layout
 import (
 	"testing"
 
-	"github.com/atharva-0123-cs/tview-demo/pane"
+	"github.com/atharva-0123-cs/tatami/pane"
 )
 
 // newWMWithPanes builds a Stacked (SplitHorizontal) tree of n zero-value panes
@@ -139,24 +139,29 @@ func TestMoveFocusDirectional(t *testing.T) {
 }
 
 // TestSeamSpansSharedEdge verifies that every span after the first starts one
-// cell before the previous span ends, so adjacent panes share a single border
-// row/column instead of two parallel borders.
+// cell before the previous span ends. That overlap is what keeps the gutter
+// between two adjacent panes at PaneGap cells: after both panes inset by
+// PaneGap, they leave exactly one shared cell blank instead of two.
 func TestSeamSpansSharedEdge(t *testing.T) {
-	sp := seamSpans(20, []int{1, 1})
+	wm := NewWindowManager() // default gap=1 -> inset=1, overlap=1
+	sp := wm.seamSpans(20, []int{1, 1})
 	if sp[0] != [2]int{0, 10} || sp[1] != [2]int{9, 20} {
 		t.Fatalf("spans = %v, want {[0 10] [9 20]}", sp)
 	}
 	// Three children: each internal boundary overlaps by exactly one cell.
-	sp = seamSpans(30, []int{1, 1, 1})
+	sp = wm.seamSpans(30, []int{1, 1, 1})
 	want := [][2]int{{0, 10}, {9, 20}, {19, 30}}
 	for i := range want {
 		if sp[i] != want[i] {
 			t.Fatalf("spans[%d] = %v, want %v", i, sp[i], want[i])
 		}
-		// The shared cell must lie inside *both* panes' spans.
 		if i > 0 && sp[i][0] != sp[i-1][1]-1 {
 			t.Fatalf("spans %v and %v do not share an edge", sp[i-1], sp[i])
 		}
+	}
+	// The pane gap must be positive so the inset actually separates panes.
+	if wm.PaneGap() < 1 {
+		t.Fatalf("PaneGap = %d, want at least 1 cell of separation", wm.PaneGap())
 	}
 }
 
@@ -164,17 +169,110 @@ func TestSeamSpansSharedEdge(t *testing.T) {
 // child absorbs rounding, zero-size children produce no span, and a lone child
 // spans the whole axis untouched.
 func TestSeamSpansEdgeCases(t *testing.T) {
-	if sp := seamSpans(21, []int{1, 1}); sp[1] != [2]int{9, 21} {
+	wm := NewWindowManager()
+	if sp := wm.seamSpans(21, []int{1, 1}); sp[1] != [2]int{9, 21} {
 		t.Fatalf("remainder spans = %v, want {[0 10] [9 21]}", sp)
 	}
-	if sp := seamSpans(0, []int{1, 4, 5}); sp[1] != [2]int{0, 0} {
+	if sp := wm.seamSpans(0, []int{1, 4, 5}); sp[1] != [2]int{0, 0} {
 		t.Fatalf("zero-avail spans = %v, want zero spans", sp)
 	}
-	if sp := seamSpans(40, []int{2}); sp[0] != [2]int{0, 40} {
+	if sp := wm.seamSpans(40, []int{2}); sp[0] != [2]int{0, 40} {
 		t.Fatalf("single span = %v, want {[0 40]}", sp)
 	}
 	// No sizes at all: empty result, no panic.
-	if sp := seamSpans(10, nil); len(sp) != 0 {
+	if sp := wm.seamSpans(10, nil); len(sp) != 0 {
 		t.Fatalf("nil sizes = %v, want empty", sp)
+	}
+}
+
+// TestGapGeometry verifies the gap derives a valid inset/overlap pair and that
+// SetPaneGap is reflected in seam span overlaps plus the default PaneGap().
+func TestGapGeometry(t *testing.T) {
+	want := map[int][2]int{ // gap -> {inset, overlap}
+		0: {1, 2},
+		1: {1, 1},
+		2: {1, 0},
+		3: {2, 1},
+		4: {2, 0},
+		6: {3, 0},
+	}
+	for gap, pair := range want {
+		g, inset, overlap := gapGeometry(gap)
+		if g != gap {
+			t.Fatalf("gapGeometry(%d) returned gap %d", gap, g)
+		}
+		if inset != pair[0] || overlap != pair[1] {
+			t.Fatalf("gapGeometry(%d) = inset %d, overlap %d; want %v/%v",
+				gap, inset, overlap, pair[0], pair[1])
+		}
+		if 2*inset-overlap != gap {
+			t.Fatalf("gapGeometry(%d): 2*inset-overlap = %d, want gutter %d",
+				gap, 2*inset-overlap, gap)
+		}
+	}
+	// Negative gaps clamp to 0 (touching panes).
+	if g, i, o := gapGeometry(-5); g != 0 || 2*i-o != 0 {
+		t.Fatalf("negative gap should behave like gap 0, got %d/%d/%d", g, i, o)
+	}
+
+	wm := NewWindowManager()
+	if wm.PaneGap() != 1 || wm.inset != 1 || wm.overlap != 1 {
+		t.Fatalf("default wm gap = %d (inset %d, overlap %d), want 1/1/1",
+			wm.PaneGap(), wm.inset, wm.overlap)
+	}
+	wm.SetPaneGap(3)
+	if wm.PaneGap() != 3 || wm.overlap != 1 {
+		t.Fatalf("after SetPaneGap(3): gap=%d overlap=%d, want 3/1", wm.PaneGap(), wm.overlap)
+	}
+	// A wider gap overlaps less: two siblings in 20 columns split with overlap.
+	wm.SetPaneGap(2)
+	if sp := wm.seamSpans(20, []int{1, 1}); sp[1] != [2]int{10, 20} {
+		t.Fatalf("gap=2 spans = %v, want contiguous {[0 10] [10 20]}", sp)
+	}
+	wm.SetPaneGap(0)
+	if sp := wm.seamSpans(20, []int{1, 1}); sp[1] != [2]int{8, 20} {
+		t.Fatalf("gap=0 spans = %v, want {[0 10] [8 20]}", sp)
+	}
+}
+
+// TestFocusAt verifies mouse-style focus: clicking inside a pane's inset
+// rectangle focuses it, clicking on borders/gaps or outside the tree does not.
+func TestFocusAt(t *testing.T) {
+	wm, panes := newWMWithPanes(t, 3)
+	wm.FocusPane(panes[2])
+
+	// 3 stacked panes in an 80x(21+1) terminal. Each pane gets 7 rows of the
+	// pane region; after a 1-cell inset each pane occupies rows [1,6), [7,13),
+	// [14,20).
+	screenW, screenH := 80, 22
+	if !wm.FocusAt(5, 2, screenW, screenH) {
+		t.Fatal("click in pane 1 should focus a pane")
+	}
+	if wm.FocusedPane() != panes[0] {
+		t.Fatal("click in top region should focus pane 1")
+	}
+	if !wm.FocusAt(5, 10, screenW, screenH) {
+		t.Fatal("click in pane 2 should focus a pane")
+	}
+	if wm.FocusedPane() != panes[1] {
+		t.Fatal("click in middle region should focus pane 2")
+	}
+	if !wm.FocusAt(5, 18, screenW, screenH) {
+		t.Fatal("click in pane 3 should focus a pane")
+	}
+	if wm.FocusedPane() != panes[2] {
+		t.Fatal("click in bottom region should focus pane 3")
+	}
+	// Status bar area is not part of any pane.
+	if wm.FocusAt(5, 21, screenW, screenH) {
+		t.Fatal("click on status bar should not focus a pane")
+	}
+	// Click in the gap between panes (no hit).
+	if wm.FocusAt(5, 6, screenW, screenH) {
+		t.Fatal("click in the pane gap should not focus a pane")
+	}
+	// Click on the left border.
+	if wm.FocusAt(0, 2, screenW, screenH) {
+		t.Fatal("click on the left border should not focus a pane")
 	}
 }

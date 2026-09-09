@@ -3,9 +3,9 @@ package layout
 
 import (
 	"fmt"
-	"log"
+	"log/slog"
 
-	"github.com/atharva-0123-cs/tview-demo/pane"
+	"github.com/atharva-0123-cs/tatami/pane"
 )
 
 // NewPane creates a new pane. If the tree is empty it becomes the root;
@@ -18,7 +18,7 @@ func (wm *WindowManager) NewPane() error {
 	label := fmt.Sprintf("%d", wm.paneCount)
 	p, err := pane.NewPane(label)
 	if err != nil {
-		log.Printf("Failed to create pane: %v", err)
+		slog.Warn("failed to create pane", "err", err)
 		return err
 	}
 
@@ -41,7 +41,7 @@ func (wm *WindowManager) NewPaneVertical() error {
 	label := fmt.Sprintf("%d", wm.paneCount)
 	p, err := pane.NewPane(label)
 	if err != nil {
-		log.Printf("Failed to create pane: %v", err)
+		slog.Warn("failed to create vertical pane", "err", err)
 		return err
 	}
 
@@ -70,7 +70,7 @@ func (wm *WindowManager) NewPaneVertical() error {
 func (wm *WindowManager) splitCurrent(newPane *pane.Pane, dir SplitDir) {
 	focusedNode := wm.findLeaf(wm.focused)
 	if focusedNode == nil {
-		log.Printf("splitCurrent: focused pane not found in tree")
+		slog.Warn("splitCurrent: focused pane not found in tree")
 		return
 	}
 

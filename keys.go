@@ -5,11 +5,11 @@ package main
 
 import (
 	"fmt"
-	"log"
+	"log/slog"
 
 	"github.com/gdamore/tcell/v2"
 
-	"github.com/atharva-0123-cs/tview-demo/layout"
+	"github.com/atharva-0123-cs/tatami/layout"
 ) // handleKey processes the multiplexer's prefix and resize commands.
 // It returns true when the multiplexer consumed the event (a command ran or a
 // mode was toggled) and false when the caller should forward the event to the
@@ -30,6 +30,14 @@ import (
 func handleKey(ev *tcell.EventKey, prefix tcell.Key) bool {
 	// Escape cancels prefix and resize mode.
 	if ev.Key() == tcell.KeyEsc {
+		if copyMode {
+			copyMode = false
+			copyOffset = 0
+			if focused := wm.FocusedPane(); focused != nil {
+				focused.Scroll(0)
+			}
+			return true
+		}
 		if resizeMode || prefixActive {
 			resizeMode = false
 			prefixActive = false
@@ -44,6 +52,55 @@ func handleKey(ev *tcell.EventKey, prefix tcell.Key) bool {
 			resizeMode = false
 		}
 		prefixActive = !prefixActive
+		return true
+	}
+
+	// Copy mode: j/k scroll, y copies visible text, q exits.
+	if copyMode {
+		if ev.Key() == tcell.KeyRune {
+			switch ev.Rune() {
+			case 'j':
+				if copyOffset > 0 {
+					copyOffset--
+					if focused := wm.FocusedPane(); focused != nil {
+						focused.Scroll(copyOffset)
+					}
+				}
+				return true
+			case 'k':
+				copyOffset++
+				if focused := wm.FocusedPane(); focused != nil {
+					focused.Scroll(copyOffset)
+				}
+				return true
+			case 'y':
+				copyMode = false
+				copyOffset = 0
+				if focused := wm.FocusedPane(); focused != nil {
+					focused.Scroll(0)
+					msg, err := focused.CopyText()
+					if err != nil {
+						setErrorMessage(err.Error())
+					} else {
+						setErrorMessage(msg)
+					}
+				}
+				return true
+			case 'q':
+				copyMode = false
+				copyOffset = 0
+				if focused := wm.FocusedPane(); focused != nil {
+					focused.Scroll(0)
+				}
+				return true
+			}
+		}
+		// Any other key exits copy mode.
+		copyMode = false
+		copyOffset = 0
+		if focused := wm.FocusedPane(); focused != nil {
+			focused.Scroll(0)
+		}
 		return true
 	}
 
@@ -87,13 +144,13 @@ func handleKey(ev *tcell.EventKey, prefix tcell.Key) bool {
 			switch ch {
 			case 'c', '-': // Horizontal split (top/bottom)
 				if err := wm.NewPane(); err != nil {
-					log.Printf("Error creating pane: %v", err)
+					slog.Error("split failed", "dir", "horizontal", "err", err)
 					setErrorMessage(fmt.Sprintf("Split failed: %v", err))
 				}
 				return true
 			case 'C', '|': // Vertical split (left/right)
 				if err := wm.NewPaneVertical(); err != nil {
-					log.Printf("Error creating vertical pane: %v", err)
+					slog.Error("split failed", "dir", "vertical", "err", err)
 					setErrorMessage(fmt.Sprintf("Split failed: %v", err))
 				}
 				return true
@@ -131,6 +188,25 @@ func handleKey(ev *tcell.EventKey, prefix tcell.Key) bool {
 				return true
 			case 'q':
 				shouldQuit = true
+				return true
+			case 'w':
+				wm.NextWindow()
+				return true
+			case 'W', 'p':
+				wm.PrevWindow()
+				return true
+			case 'n':
+				if err := wm.NewWindow(); err != nil {
+					slog.Error("failed to create window", "err", err)
+					setErrorMessage(fmt.Sprintf("New window failed: %v", err))
+				}
+				return true
+			case '[':
+				copyMode = true
+				copyOffset = 0
+				if focused := wm.FocusedPane(); focused != nil {
+					focused.Scroll(0)
+				}
 				return true
 			}
 		}

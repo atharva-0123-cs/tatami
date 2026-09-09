@@ -4,7 +4,7 @@ package pane
 
 import (
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"os/exec"
 	"strings"
@@ -26,7 +26,7 @@ func shellCandidates() []string {
 			return
 		}
 		if _, err := exec.LookPath(s); err != nil {
-			log.Printf("Shell candidate %q not found, skipping: %v", s, err)
+			slog.Warn("shell candidate not found, skipping", "shell", s, "err", err)
 			return
 		}
 		seen[s] = true
@@ -66,7 +66,7 @@ func spawnShell(cwd string) (*os.File, *exec.Cmd, error) {
 
 	var lastErr error
 	for _, sh := range shells {
-		cmd := exec.Command(sh)
+		cmd := exec.Command(sh, "-i")
 		cmd.Dir = cwd
 		cmd.Env = setEnv(os.Environ(), "TERM", "xterm-256color")
 		m, serr := pty.Start(cmd)
@@ -74,7 +74,7 @@ func spawnShell(cwd string) (*os.File, *exec.Cmd, error) {
 			return m, cmd, nil
 		}
 		lastErr = serr
-		log.Printf("Warning: failed to start shell %q: %v", sh, serr)
+		slog.Warn("failed to start shell", "shell", sh, "err", serr)
 	}
 
 	return nil, nil, fmt.Errorf(

@@ -29,7 +29,7 @@ func CopyToClipboard(text string) (string, error) {
 			return tool[0], nil
 		}
 	}
-	path := filepath.Join(os.TempDir(), "roge-copy.txt")
+	path := filepath.Join(os.TempDir(), "tatami-copy.txt")
 	if err := os.WriteFile(path, []byte(text), 0644); err != nil {
 		return "", fmt.Errorf("no clipboard tool found and temp-file fallback failed: %w", err)
 	}

@@ -1,55 +1,81 @@
-// Command tview-demo is the entry point for the "roge" terminal
-// multiplexer: it owns the tcell screen, the Ctrl+A prefix, the resize-mode
-// state, and the PollEvent loop that drives every pane. The multiplexer key
-// handling lives in keys.go and the per-loop UI state in state.go.
 package main
 
 import (
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 
 	"github.com/gdamore/tcell/v2"
 
-	"github.com/atharva-0123-cs/tview-demo/config"
-	"github.com/atharva-0123-cs/tview-demo/layout"
-	"github.com/atharva-0123-cs/tview-demo/pane"
-) // main opens the debug log, initializes the tcell screen and the window
-// manager, creates the first pane, then runs the PollEvent loop until the
-// last pane is closed.
-//
-// The loop wakes on any event type: keys are routed through handleKey/forwardKey
-// (bracketed paste forwards verbarim), paste start/end marks pasteActive and
-// emits the bracketed-paste delimiters when the shell enabled mode 2004,
-// resize/interrupt events trigger a render, and error events are only logged.
-// Renders always go through the render closure (Clear -> wm.Draw -> Show),
-// which must stay on this goroutine so the tcell screen buffer is only ever
-// touched from the main thread.
-func main() {
-	f, err := os.OpenFile("roge.log", os.O_RDWR|os.O_CREATE|os.O_APPEND, 0644)
+	"github.com/atharva-0123-cs/tatami/config"
+	"github.com/atharva-0123-cs/tatami/format"
+	"github.com/atharva-0123-cs/tatami/layout"
+	"github.com/atharva-0123-cs/tatami/pane"
+)
+
+func openLogFile() *os.File {
+	f, err := os.OpenFile("tatami.log", os.O_RDWR|os.O_CREATE|os.O_APPEND, 0644)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error opening log file: %v\n", err)
+		fmt.Fprintf(os.Stderr, "tatami: cannot open log file: %v\n", err)
 		os.Exit(1)
 	}
+	return f
+}
+
+// ("text" renders "[INFO] time file:line : message", "json" is for tooling)
+func setupLogger(f *os.File, level slog.Level, kind string) {
+	opts := &slog.HandlerOptions{Level: level, AddSource: true}
+	var h slog.Handler
+	if kind == "text" {
+		h = format.NewConsoleHandler(f, opts)
+	} else {
+		h = slog.NewJSONHandler(f, opts)
+	}
+	slog.SetDefault(slog.New(h))
+}
+
+// fail logs a fatal startup error (to the log file) and mirrors it on stderr
+// before exiting with status 1.
+func fail(msg string, err error) {
+	if err != nil {
+		msg = fmt.Sprintf("%s: %v", msg, err)
+	}
+	slog.Error(msg)
+	fmt.Fprintf(os.Stderr, "tatami: %s\n", msg)
+	cleanup()
+	os.Exit(1)
+}
+
+func main() {
+	f := openLogFile()
 	defer f.Close()
-	log.SetOutput(f)
-	log.Println("Starting roge TUI app...")
+
+	// Initial logger with defaults so any config warnings are captured in the
+	// log file; recreated below once the effective profile is known.
+	setupLogger(f, slog.LevelInfo, "text")
 
 	cfg := config.Load()
-	log.Printf("config: prefix=%s mouse=%v", cfg.PrefixLabel, cfg.Mouse)
+	setupLogger(f, cfg.LogLevel, cfg.LogFormat)
 
-	screen, err = tcell.NewScreen()
+	slog.Info("tatami starting",
+		"prefix", cfg.PrefixLabel,
+		"mouse", cfg.Mouse,
+		"pane_gap", cfg.PaneGap,
+	)
+
+	// Defer cleanup until the very end, so panics restore the terminal too.
+	defer cleanup()
+
+	var err error
+	screen, err = tcell.NewScreen() // assign to package-level var (never shadow it)
 	if err != nil {
-		log.Fatalf("Error creating screen: %v", err)
+		fail("error creating screen", err)
 	}
-	if err := screen.Init(); err != nil {
-		log.Fatalf("Error initializing screen: %v", err)
+	if err = screen.Init(); err != nil {
+		fail("error initializing screen", err)
 	}
-	defer screen.Fini()
-
-	screen.EnablePaste()
 	if cfg.Mouse {
-		screen.EnableMouse(tcell.MouseDragEvents)
+		screen.EnableMouse(tcell.MouseButtonEvents | tcell.MouseDragEvents)
 	}
 
 	// Wake the PollEvent loop whenever a background goroutine (PTY output
@@ -59,8 +85,9 @@ func main() {
 	}
 
 	wm = layout.NewWindowManager()
+	wm.SetPaneGap(cfg.PaneGap)
 	if err := wm.NewPane(); err != nil {
-		log.Fatalf("Error creating initial pane: %v", err)
+		fail("error creating initial pane", err)
 	}
 
 	style := layout.StatusStyle{PrefixLabel: cfg.PrefixLabel, Fg: cfg.StatusFg, Bg: cfg.StatusBg}
@@ -68,7 +95,7 @@ func main() {
 	render := func() {
 		screen.Clear()
 		w, h := screen.Size()
-		wm.Draw(screen, w, h, prefixActive, resizeMode, errorMsg, style)
+		wm.Draw(screen, w, h, prefixActive, resizeMode, copyMode, errorMsg, style)
 		screen.Show()
 	}
 
@@ -110,6 +137,16 @@ func main() {
 			}
 			render()
 
+		case *tcell.EventMouse:
+			buttons := ev.Buttons()
+			if buttons&tcell.ButtonPrimary != 0 {
+				px, py := ev.Position()
+				sw, sh := screen.Size()
+				if wm.FocusAt(px, py, sw, sh) {
+					render()
+				}
+			}
+
 		case *tcell.EventResize:
 			render()
 
@@ -117,13 +154,29 @@ func main() {
 			render()
 
 		case *tcell.EventError:
-			log.Printf("Screen error event: %v", ev.Error())
+			slog.Error("screen event error", "err", ev.Error())
 		}
 	}
 
-	for _, p := range wm.CollectPanes() {
-		_ = p.Close()
-	}
+}
 
-	log.Println("Exiting roge TUI app.")
+// cleanup terminates every pane's process, finalizes the tcell screen (if it
+// was initialized), and restores the terminal to its original state. It is safe
+// to call multiple times.
+func cleanup() {
+	if wm != nil {
+		for _, p := range wm.CollectAllPanes() {
+			_ = p.Close()
+		}
+		wm = nil
+	}
+	if screen != nil {
+		screen.Fini()
+		screen = nil
+	}
+	// tcell's restore is terminfo-dependent and on some terminals leaves the
+	// alternate screen active with raw cursor/character modes. Emit the standard
+	// xterm reset sequences directly to stdout so the shell always regains a
+	// clean, interactive terminal regardless of the terminfo entry used.
+	fmt.Fprint(os.Stdout, "\x1b[0m\x1b[39;49m\x1b[?25h\x1b[?1l\x1b[?1049l")
 }

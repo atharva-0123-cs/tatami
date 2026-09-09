@@ -7,7 +7,7 @@ package main
 import (
 	"github.com/gdamore/tcell/v2"
 
-	"github.com/atharva-0123-cs/tview-demo/layout"
+	"github.com/atharva-0123-cs/tatami/layout"
 )
 
 var (
@@ -16,6 +16,8 @@ var (
 	prefixActive bool                  // Ctrl+A prefix mode is armed
 	resizeMode   bool                  // resize mode (Ctrl+A r) is armed
 	pasteActive  bool                  // a bracketed paste is in progress
+	copyMode     bool                  // copy/scroll mode is armed
+	copyOffset   int                   // scroll offset in copy mode (lines from bottom)
 	errorMsg     string                // transient status-bar message, cleared on the next key
 	shouldQuit   bool                  // when true the PollEvent loop exits
 )

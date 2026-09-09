@@ -1,4 +1,4 @@
-module github.com/atharva-0123-cs/tview-demo
+module github.com/atharva-0123-cs/tatami
 
 go 1.25.9
 

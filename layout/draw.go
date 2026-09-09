@@ -5,7 +5,7 @@ package layout
 
 import (
 	"fmt"
-	"log"
+	"log/slog"
 
 	"github.com/gdamore/tcell/v2"
 )
@@ -24,20 +24,20 @@ import (
 //
 // Draw must run on the main goroutine (it touches the tcell screen buffer and,
 // inside each Pane.Draw, resizes PTYs).
-func (wm *WindowManager) Draw(screen tcell.Screen, width, height int, prefixActive, resizeMode bool, errorMsg string, style StatusStyle) {
+func (wm *WindowManager) Draw(screen tcell.Screen, width, height int, prefixActive, resizeMode, copyMode bool, errorMsg string, style StatusStyle) {
 	if width <= 0 || height <= 0 {
 		return
 	}
 
 	if wm.root == nil && wm.PaneCount() == 0 {
 		if err := wm.NewPane(); err != nil {
-			log.Printf("failed to create initial pane: %v", err)
+			slog.Warn("failed to create initial pane", "err", err)
 			return
 		}
 	}
 
 	if wm.root == nil {
-		wm.renderStatus(screen, width, height, prefixActive, resizeMode, errorMsg, style)
+		wm.renderStatus(screen, width, height, prefixActive, resizeMode, copyMode, errorMsg, style)
 		screen.HideCursor()
 		return
 	}
@@ -65,7 +65,7 @@ func (wm *WindowManager) Draw(screen tcell.Screen, width, height int, prefixActi
 		}
 	}
 
-	wm.renderStatus(screen, width, height, prefixActive, resizeMode, errorMsg, style)
+	wm.renderStatus(screen, width, height, prefixActive, resizeMode, copyMode, errorMsg, style)
 
 	if cursorVisible {
 		screen.ShowCursor(cursorX, cursorY)
@@ -82,8 +82,8 @@ func (wm *WindowManager) Draw(screen tcell.Screen, width, height int, prefixActi
 // weight using seamSpans: horizontal splits stack children top-to-bottom (each
 // child gets a band of height avail*size/total, the last child absorbing
 // rounding remainder), vertical splits lay children out left-to-right the same
-// way for widths, and every sibling after the first overlaps the previous one
-// by one cell so the shared edge renders as a single border row/column. The
+// way for widths. Leaves inset their assigned rectangle by the window's gap
+// inset on every side so adjacent panes are separated by a thin gutter. The
 // focused pane's cursor coordinates bubble up to Draw.
 //
 // distribute returns (cursorX, cursorY, hasCursor); hasCursor is true only for
@@ -96,8 +96,17 @@ func (wm *WindowManager) distribute(n *LayoutNode, x0, y0, x1, y1 int, screen tc
 		if n.Pane == nil {
 			return 0, 0, false
 		}
+		// Inset by wm.inset on all sides to create visible separation
+		// between adjacent panes (and from the screen edge).
+		ix0 := x0 + wm.inset
+		iy0 := y0 + wm.inset
+		ix1 := x1 - wm.inset
+		iy1 := y1 - wm.inset
+		if ix1 <= ix0 || iy1 <= iy0 {
+			return 0, 0, false
+		}
 		isFocused := (n.Pane == wm.focused)
-		cx, cy, hc := n.Pane.Draw(x0, y0, x1, y1, isFocused, screen)
+		cx, cy, hc := n.Pane.Draw(ix0, iy0, ix1, iy1, isFocused, screen)
 		if isFocused && hc {
 			return cx, cy, true
 		}
@@ -121,7 +130,7 @@ func (wm *WindowManager) distribute(n *LayoutNode, x0, y0, x1, y1 int, screen tc
 	}
 
 	for i, child := range n.children {
-		sp := seamSpans(avail, n.sizes)[i]
+		sp := wm.seamSpans(avail, n.sizes)[i]
 		if sp[1] <= sp[0] {
 			continue
 		}
@@ -140,16 +149,39 @@ func (wm *WindowManager) distribute(n *LayoutNode, x0, y0, x1, y1 int, screen tc
 	return cursorX, cursorY, hasCursor
 }
 
+// gapGeometry derives the per-pane inset and shared-edge overlap from a
+// requested gutter width.
+//
+// Leaves inset their rectangle by inset on every side and sibling spans within
+// one container overlap by overlap cells on their shared edge (seamSpans), so
+// two adjacent panes leave exactly
+//
+//	gutter = 2*inset - overlap
+//
+// empty cells between their borders. The inset also becomes the outer margin,
+// so the smallest sensible gap (1) yields the classic thin border.
+func gapGeometry(g int) (gap, inset, overlap int) {
+	if g < 0 {
+		g = 0
+	}
+	inset = (g + 1) / 2
+	if inset < 1 {
+		inset = 1
+	}
+	overlap = 2*inset - g
+	return g, inset, overlap
+}
+
 // seamSpans computes each child's [start, end) span along a split axis given
 // the available length and proportional sizes.
 //
 // Children are laid out proportionally (span = avail*size/total, the last child
 // absorbing the rounding remainder). Each child after the first overlaps the
-// previous child by one cell on the shared edge: the new child starts one cell
-// *before* where the previous child ended, so the two panes' touching borders
-// land on the same row/column and render as a single divider. Spans are clamped
-// to never start before the axis origin.
-func seamSpans(avail int, sizes []int) [][2]int {
+// previous one by overlap cells on the shared edge; combined with the inset
+// applied in distribute, that overlap leaves exactly gap cells between the two
+// borders (see gapGeometry). Spans are clamped to never start before the axis
+// origin.
+func (wm *WindowManager) seamSpans(avail int, sizes []int) [][2]int {
 	total := 0
 	for _, s := range sizes {
 		total += s
@@ -166,7 +198,7 @@ func seamSpans(avail int, sizes []int) [][2]int {
 		}
 		start := cursor
 		if i > 0 {
-			start = cursor - 1
+			start = cursor - wm.overlap
 			if start < 0 {
 				start = 0
 			}
@@ -208,29 +240,50 @@ func (s StatusStyle) resolve() StatusStyle {
 
 // renderStatus draws the status line at the bottom of the screen.
 //
-// The left half shows the mode banner (" ROGE | [PREFIX] ...", "[RESIZE] ..."
+// The left half shows the mode banner (" TATAMI | [PREFIX] ...", "[RESIZE] ..."
 // or an error message) in the highlighted color while a mode/error is active;
 // the right half shows the pane count and focused index (plus "[ZOOM]" when
 // zoomed). The whole row is blanked first so stale glyphs never survive from a
 // previous size. Must run on the main goroutine.
-func (wm *WindowManager) renderStatus(screen tcell.Screen, maxX, maxY int, prefixActive, resizeMode bool, errorMsg string, style StatusStyle) {
+func (wm *WindowManager) renderStatus(screen tcell.Screen, maxX, maxY int, prefixActive, resizeMode, copyMode bool, errorMsg string, style StatusStyle) {
 	style = style.resolve()
 	y := maxY - 1
-	left := " ROGE "
+	left := " TATAMI "
 	if errorMsg != "" {
 		left += "| " + errorMsg + " "
+	} else if copyMode {
+		left += "| [COPY] j/k:scroll y:copy q:quit "
 	} else if resizeMode {
 		left += "| [RESIZE] h/j/k/l to resize, Esc to cancel "
 	} else if prefixActive {
-		left += "| [PREFIX] c:h-split C:v-split x:close z:zoom 1-9:jump q:quit "
+		left += "| [PREFIX] c:h-split C:v-split n:new-win w:next Win W/p:prev-win x:close z:zoom 1-9:jump q:quit "
 	} else {
 		left += fmt.Sprintf("| Prefix: %s then commands... ", style.PrefixLabel)
 	}
 
+	// Window list: each window name, the active one wrapped in brackets.
+	winList := ""
+	if wm.WindowCount() > 1 {
+		names := wm.WindowNames()
+		for i, name := range names {
+			if i == wm.currentWin {
+				winList += "[" + name + "] "
+			} else {
+				winList += name + " "
+			}
+		}
+	}
+
 	total := wm.PaneCount()
 	right := ""
+	if winList != "" {
+		right = winList
+	}
 	if total > 0 {
-		right = fmt.Sprintf("panes: %d", total)
+		if right != "" {
+			right += "| "
+		}
+		right += fmt.Sprintf("panes: %d", total)
 		if wm.focused != nil {
 			right += fmt.Sprintf(" | pane: %d/%d", wm.PaneIndex(wm.focused), total)
 		}
@@ -244,12 +297,12 @@ func (wm *WindowManager) renderStatus(screen tcell.Screen, maxX, maxY int, prefi
 	bg := style.Bg
 	if errorMsg != "" {
 		fg = statusErr
-	} else if prefixActive || resizeMode {
+	} else if prefixActive || resizeMode || copyMode {
 		fg = statusHi
 	}
 
 	st := tcell.StyleDefault.Foreground(fg).Background(bg)
-	if errorMsg != "" || prefixActive || resizeMode {
+	if errorMsg != "" || prefixActive || resizeMode || copyMode {
 		st = st.Bold(true)
 	}
 

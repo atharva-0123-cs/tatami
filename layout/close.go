@@ -3,9 +3,9 @@
 package layout
 
 import (
-	"log"
+	"log/slog"
 
-	"github.com/atharva-0123-cs/tview-demo/pane"
+	"github.com/atharva-0123-cs/tatami/pane"
 )
 
 // CloseCurrentPane removes the focused pane from the layout. It returns true
@@ -21,22 +21,61 @@ func (wm *WindowManager) CloseCurrentPane() bool {
 	return wm.closeLeaf(focusedNode)
 }
 
-// CloseDeadPanes removes every pane whose shell process has exited. It returns
-// true if the last pane was closed (the app should quit).
+// CloseDeadPanes removes every pane whose shell process has exited, across all
+// windows. It returns true if the last window was closed (the app should quit).
 //
 // Called at the top of every event-loop iteration; panes that were marked dead
 // by their process-exit goroutine get closed and the tree is refocused so the
-// UI always shows a live neighbor.
+// UI always shows a live neighbor. Dead panes in inactive windows are cleaned
+// up too by temporarily switching to each affected window.
 func (wm *WindowManager) CloseDeadPanes() bool {
-	if wm.root == nil {
+	type group struct {
+		idx   int
+		panes []*pane.Pane
+	}
+	var groups []group
+	origIdx := wm.currentWin
+
+	for i, w := range wm.windows {
+		// The active window's tree lives in wm.root; inactive windows keep
+		// theirs in the saved record.
+		root := w.root
+		if i == wm.currentWin {
+			root = wm.root
+		}
+		if root == nil {
+			continue
+		}
+		var panes []*pane.Pane
+		wm.walk(root, func(n *LayoutNode) {
+			if n.Leaf && n.Pane != nil && n.Pane.IsDead() {
+				panes = append(panes, n.Pane)
+			}
+		})
+		if len(panes) > 0 {
+			groups = append(groups, group{i, panes})
+		}
+	}
+	if len(groups) == 0 {
 		return false
 	}
-	for _, p := range wm.collectPanes() {
-		if p.IsDead() {
+
+	for _, g := range groups {
+		// The window may have been removed during a previous group's sweep.
+		if g.idx >= len(wm.windows) {
+			continue
+		}
+		wm.switchTo(g.idx)
+		for _, p := range g.panes {
 			if wm.closePane(p) {
 				return true
 			}
 		}
+	}
+
+	// Restore the user's original window if it still exists.
+	if origIdx < len(wm.windows) {
+		wm.switchTo(origIdx)
 	}
 	return false
 }
@@ -64,7 +103,7 @@ func (wm *WindowManager) closePane(p *pane.Pane) bool {
 func (wm *WindowManager) closeLeaf(focusedNode *LayoutNode) bool {
 	p := focusedNode.Pane
 	if err := p.Close(); err != nil {
-		log.Printf("Error closing pane: %v", err)
+		slog.Error("failed to close pane", "pane", p.Name(), "err", err)
 	}
 	if wm.zoomed == p {
 		wm.zoomed = nil
@@ -73,9 +112,10 @@ func (wm *WindowManager) closeLeaf(focusedNode *LayoutNode) bool {
 	parent := focusedNode.Parent
 
 	if parent == nil {
-		wm.root = nil
-		wm.focused = nil
-		return true
+		// The last pane in the active window is gone. If other windows
+		// exist, remove this window and switch to a neighbor; otherwise
+		// the app quits.
+		return wm.windowGone()
 	}
 
 	sibling := wm.pickSibling(focusedNode)
@@ -109,8 +149,7 @@ func (wm *WindowManager) closeLeaf(focusedNode *LayoutNode) bool {
 			wm.setFocus(panes[0])
 			return false
 		}
-		wm.focused = nil
-		return true
+		return wm.windowGone()
 	}
 	return false
 }
