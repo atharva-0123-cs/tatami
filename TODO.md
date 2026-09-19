@@ -1,8 +1,6 @@
 # Tatami TODO
 
-Tatami is an agentic terminal multiplexer. The core terminal-multiplexing
-foundation is already implemented; this TODO tracks the next stages toward
-agent-aware development workflows.
+Tatami is a terminal multiplexer (with a future roadmap toward agent-aware development workflows). The core terminal-multiplexing foundation is already implemented; this TODO tracks what has been built versus upcoming stages.
 
 ## 1. Agentic Coding Harness
 
@@ -102,59 +100,59 @@ agent-aware development workflows.
 
 ## 5. Terminal / VT Emulator
 
-- [ ] Improve VT parser coverage.
-- [ ] Add more CSI sequences.
-- [ ] Add more OSC sequences.
-- [ ] Verify alternate-screen behavior.
-- [ ] Verify scroll regions.
+- [x] Improve VT parser coverage.
+- [x] Add more CSI sequences.
+- [x] Add more OSC sequences.
+- [x] Verify alternate-screen behavior.
+- [x] Verify scroll regions.
 - [ ] Verify insert/delete character operations.
 - [ ] Verify insert/delete line operations.
-- [ ] Improve SGR handling.
-- [ ] Improve truecolor handling.
-- [ ] Improve 256-color handling.
-- [ ] Improve Unicode handling.
-- [ ] Improve CJK width handling.
+- [x] Improve SGR handling.
+- [x] Improve truecolor handling.
+- [x] Improve 256-color handling.
+- [x] Improve Unicode handling.
+- [x] Improve CJK width handling.
 - [ ] Improve emoji width handling.
 - [ ] Handle combining characters.
 - [ ] Handle hyperlinks.
 - [ ] Handle OSC 52 clipboard.
-- [ ] Handle terminal title changes.
-- [ ] Improve scrollback.
-- [ ] Add VT compatibility tests.
-- [ ] Test against vim.
-- [ ] Test against neovim.
+- [x] Handle terminal title changes.
+- [x] Improve scrollback.
+- [x] Add VT compatibility tests.
+- [x] Test against vim.
+- [x] Test against neovim.
 - [ ] Test against htop.
-- [ ] Test against less.
+- [x] Test against less.
 - [ ] Test against tmux.
-- [ ] Test against shells.
+- [x] Test against shells.
 
 ## 6. PTY / Process Management
 
-- [ ] Improve shell detection.
-- [ ] Improve PTY lifecycle handling.
+- [x] Improve shell detection.
+- [x] Improve PTY lifecycle handling.
 - [ ] Handle SIGHUP correctly.
-- [ ] Handle SIGWINCH correctly.
-- [ ] Improve process cleanup.
+- [x] Handle SIGWINCH correctly.
+- [x] Improve process cleanup.
 - [ ] Handle orphaned processes.
-- [ ] Handle shell crashes.
-- [ ] Handle PTY read errors.
-- [ ] Handle PTY write errors.
-- [ ] Add configurable shell.
+- [x] Handle shell crashes.
+- [x] Handle PTY read errors.
+- [x] Handle PTY write errors.
+- [x] Add configurable shell.
 - [ ] Add configurable environment.
 - [ ] Add configurable startup command.
 - [ ] Add configurable login/non-login shell mode.
 
 ## 7. Multiplexer Features
 
-- [ ] Multiple windows.
+- [x] Multiple windows.
 - [ ] Window renaming.
-- [ ] Window list.
+- [x] Window list.
 - [ ] Pane naming.
 - [ ] Pane selection UI.
 - [ ] Pane search.
-- [ ] Pane zoom.
-- [ ] Pane swapping.
-- [ ] Pane movement.
+- [x] Pane zoom.
+- [x] Pane swapping.
+- [x] Pane movement.
 - [ ] Pane synchronization.
 - [ ] Session management.
 - [ ] Attach to existing session.
@@ -181,19 +179,19 @@ agent-aware development workflows.
 
 ## 9. Configuration
 
-- [ ] Expand tatami.conf.
-- [ ] Configure key bindings.
-- [ ] Configure prefix key.
-- [ ] Configure colors.
-- [ ] Configure pane borders.
-- [ ] Configure status bar.
-- [ ] Configure shell.
+- [x] Expand tatami.conf.
+- [x] Configure key bindings.
+- [x] Configure prefix key.
+- [x] Configure colors.
+- [x] Configure pane borders.
+- [x] Configure status bar.
+- [x] Configure shell.
 - [ ] Configure agents.
 - [ ] Configure agent permissions.
-- [ ] Configure logging.
+- [x] Configure logging.
 - [ ] Configure scrollback.
 - [ ] Configure startup layout.
-- [ ] Add configuration validation.
+- [x] Add configuration validation.
 - [ ] Add configuration reload.
 
 ## 10. Git Integration
@@ -211,21 +209,21 @@ agent-aware development workflows.
 
 ## 11. Observability
 
-- [ ] Improve structured logging.
+- [x] Improve structured logging.
 - [ ] Add agent session IDs.
 - [ ] Add pane IDs to logs.
 - [ ] Add command IDs.
 - [ ] Add execution timing.
 - [ ] Add agent token/cost tracking where available.
-- [ ] Add debug mode.
-- [ ] Add trace mode.
-- [ ] Add crash diagnostics.
+- [x] Add debug mode.
+- [x] Add trace mode.
+- [x] Add crash diagnostics.
 
 ## 12. Testing
 
-- [ ] Unit tests for layout.
-- [ ] Unit tests for VT parser.
-- [ ] Unit tests for input handling.
+- [x] Unit tests for layout.
+- [x] Unit tests for VT parser.
+- [x] Unit tests for input handling.
 - [ ] PTY integration tests.
 - [ ] End-to-end terminal tests.
 - [ ] Agent harness tests.
@@ -252,17 +250,17 @@ agent-aware development workflows.
 
 ## 14. Documentation
 
-- [ ] Architecture documentation.
+- [x] Architecture documentation.
 - [ ] Agent architecture documentation.
 - [ ] Agent protocol documentation.
-- [ ] Configuration reference.
-- [ ] Key binding reference.
+- [x] Configuration reference.
+- [x] Key binding reference.
 - [ ] Plugin/agent integration guide.
-- [ ] Developer guide.
+- [x] Developer guide.
 - [ ] Security model.
-- [ ] Concurrency model.
-- [ ] VT emulator documentation.
-- [ ] Contribution guide.
+- [x] Concurrency model.
+- [x] VT emulator documentation.
+- [x] Contribution guide.
 
 ## 15. Security
 
@@ -276,63 +274,3 @@ agent-aware development workflows.
 - [ ] Add agent sandboxing where possible.
 - [ ] Audit shell command execution.
 - [ ] Audit external-agent integration.
-
-
-# file tree 
-tatami/
-├── AGENTS.md
-├── README.md
-├── DOCS.md
-├── TODO.md
-├── LICENSE
-├── .gitignore
-├── go.mod
-├── go.sum
-│
-├── cmd/
-│   └── tatami/
-│       └── main.go
-│
-├── internal/
-│   ├── pane/
-│   │   ├── pane.go
-│   │   ├── input.go
-│   │   ├── output.go
-│   │   ├── draw.go
-│   │   ├── clipboard.go
-│   │   ├── process.go
-│   │   └── vt.go
-│   │
-│   ├── layout/
-│   │   ├── layout.go
-│   │   ├── draw.go
-│   │   ├── focus.go
-│   │   ├── resize.go
-│   │   ├── splits.go
-│   │   ├── transform.go
-│   │   └── close.go
-│   │
-│   ├── config/
-│   │   ├── config.go
-│   │   └── config_test.go
-│   │
-│   ├── format/
-│   │   └── format.go
-│   │
-│   ├── input/
-│   │   ├── keys.go
-│   │   └── input.go
-│   │
-│   └── state/
-│       └── state.go
-│
-├── configs/
-│   └── tatami.example.conf
-│
-├── docs/
-│   └── architecture.md
-│
-└── testdata/
-    └── vt/
-
-

@@ -1,9 +1,4 @@
 // Command tatami is a terminal multiplexer.
-//
-// main is a thin launcher: it opens and configures the log file, loads the
-// configuration profile, and hands off to the app package, which owns the
-// tcell screen, the layout, and the event loop. Terminal cleanup is
-// guaranteed via the deferred app.Cleanup even on a startup failure.
 package main
 
 import (
