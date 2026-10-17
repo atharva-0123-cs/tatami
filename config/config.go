@@ -34,6 +34,9 @@ type Config struct {
 	LogLevel    slog.Level // minimum log level emitted to the log file
 	LogFormat   string     // "text" (default: "[LEVEL] time file:line : message") or "json"
 	PaneGap     int        // gutter between adjacent panes, in cells (default 1)
+	FalkorHost  string     // FalkorDB host (default localhost)
+	FalkorPort  int        // FalkorDB port (default 6379)
+	FalkorGraph string     // FalkorDB graph name (default tatami)
 }
 
 // defaultConfig returns the built-in settings used when no config file or
@@ -48,6 +51,9 @@ func defaultConfig() *Config {
 		LogLevel:    slog.LevelInfo,
 		LogFormat:   "text",
 		PaneGap:     1,
+		FalkorHost:  "localhost",
+		FalkorPort:  6379,
+		FalkorGraph: "tatami",
 	}
 }
 
@@ -150,6 +156,19 @@ func (c *Config) applyEnv() {
 			slog.Warn("config: invalid TATAMI_PANE_GAP", "err", err)
 		}
 	}
+	if v := os.Getenv("TATAMI_FALKORDB_HOST"); v != "" {
+		c.FalkorHost = v
+	}
+	if v := os.Getenv("TATAMI_FALKORDB_PORT"); v != "" {
+		if p, err := strconv.Atoi(v); err == nil {
+			c.FalkorPort = p
+		} else {
+			slog.Warn("config: invalid TATAMI_FALKORDB_PORT", "err", err)
+		}
+	}
+	if v := os.Getenv("TATAMI_FALKORDB_GRAPH"); v != "" {
+		c.FalkorGraph = v
+	}
 }
 
 // set applies a single parsed key=value pair, logging and skipping anything it
@@ -198,6 +217,16 @@ func (c *Config) set(key, value string) {
 		} else {
 			slog.Warn("config: invalid pane_gap", "value", value, "err", err)
 		}
+	case "falkordb_host":
+		c.FalkorHost = value
+	case "falkordb_port":
+		if p, err := strconv.Atoi(value); err == nil {
+			c.FalkorPort = p
+		} else {
+			slog.Warn("config: invalid falkordb_port", "value", value, "err", err)
+		}
+	case "falkordb_graph":
+		c.FalkorGraph = value
 	default:
 		slog.Warn("config: ignoring unknown key", "key", key)
 	}
