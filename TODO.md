@@ -1,8 +1,37 @@
 # Tatami TODO
 
-Tatami is a terminal multiplexer (with a future roadmap toward agent-aware development workflows). The core terminal-multiplexing foundation is already implemented; this TODO tracks what has been built versus upcoming stages.
+Tatami is a terminal multiplexer with an integrated FalkorDB graph engine and a roadmap toward agent-aware development workflows.
 
-## 1. Agentic Coding Harness
+## 1. FalkorDB Graph Integration 
+
+### FalkorDB Core & Client Setup
+- [ ] Implement FalkorDB connection manager using Redis/FalkorDB Go client.
+- [ ] Add configuration settings in `tatami.conf` for FalkorDB host, port, and credentials (`falkordb_host`, `falkordb_port`).
+- [ ] Add startup health-check and connection error handling.
+
+### Codebase & Dependency Knowledge Graph
+- [ ] Implement AST parser / repository scanner for Go, Python, and JS/TS projects.
+- [ ] Ingest code structures (Files, Functions, Structs, Imports) into FalkorDB graph.
+- [ ] Implement Cypher query parser and execution engine.
+- [ ] Add a Cypher Query interactive TUI pane / command prompt in Tatami.
+- [ ] Support graph-based dependency & call-chain traversals (`MATCH ... RETURN ...`).
+
+### Persistent Workspace & Process Graph
+- [ ] Model windows, layout trees (splits), active panes, and working directories as graph nodes in FalkorDB.
+- [ ] Model process execution ancestry (`parent_pid -> child_pid`) in FalkorDB.
+- [ ] Implement session save / snapshot command (`tatami save`).
+- [ ] Implement session restore command (`tatami restore`) to instantly resurrect multi-pane dev environments.
+
+### Multi-Agent Shared Memory Graph
+- [ ] Build shared memory graph schema in FalkorDB for multi-agent coordination.
+- [ ] Allow AI agents in different panes to read/write findings, bug reports, and task dependencies (`(Agent)-[:FOUND]->(Bug)-[:AFFECTS]->(File)`).
+- [ ] Add agent synchronization primitives via FalkorDB pub/sub or graph polling.
+
+### Semantic Terminal History & Analytics Graph
+- [ ] Store executed shell commands, exit codes, output error summaries, and affected files as a directed graph in FalkorDB.
+- [ ] Query command success patterns and troubleshooting paths using Cypher pattern matching.
+
+## 2. Agentic Coding Harness
 
 ### Built-in Tatami Agent
 
