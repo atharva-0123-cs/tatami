@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/atharva-0123-cs/tatami/config"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -16,20 +17,23 @@ type Client struct {
 	connected bool
 }
 
-// NewClient creates a new FalkorDB client.
-func NewClient(host string, port int, graphName string) *Client {
-	addr := fmt.Sprintf("%s:%d", host, port)
+// GlobalClient provides access to the FalkorDB instance across Tatami.
+var GlobalClient *Client
+
+// Initialize sets up the global FalkorDB client based on the loaded config.
+func Initialize(cfg *config.Config) {
+	addr := fmt.Sprintf("%s:%d", cfg.FalkorHost, cfg.FalkorPort)
+	slog.Info("initializing falkordb client", "addr", addr, "graph", cfg.FalkorGraph)
+	
 	rdb := redis.NewClient(&redis.Options{
 		Addr:     addr,
 		Password: "",
 		DB:       0,
 	})
-	if graphName == "" {
-		graphName = "tatami"
-	}
-	return &Client{
+	
+	GlobalClient = &Client{
 		rdb:       rdb,
-		graphName: graphName,
+		graphName: cfg.FalkorGraph,
 	}
 }
 
@@ -54,6 +58,7 @@ func (c *Client) Query(ctx context.Context, cypher string) (interface{}, error) 
 			return nil, err
 		}
 	}
+	// The GRAPH.QUERY command in FalkorDB (via Redis)
 	cmd := c.rdb.Do(ctx, "GRAPH.QUERY", c.graphName, cypher)
 	if cmd.Err() != nil {
 		return nil, cmd.Err()
@@ -63,5 +68,8 @@ func (c *Client) Query(ctx context.Context, cypher string) (interface{}, error) 
 
 // Close closes the underlying redis connection.
 func (c *Client) Close() error {
-	return c.rdb.Close()
+	if c.rdb != nil {
+		return c.rdb.Close()
+	}
+	return nil
 }

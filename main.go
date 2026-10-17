@@ -7,6 +7,7 @@ import (
 	"os"
 
 	"github.com/atharva-0123-cs/tatami/config"
+	"github.com/atharva-0123-cs/tatami/falkor"
 	"github.com/atharva-0123-cs/tatami/format"
 	"github.com/atharva-0123-cs/tatami/internal/app"
 )
@@ -42,6 +43,9 @@ func main() {
 
 	cfg := config.Load()
 	setupLogger(f, cfg.LogLevel, cfg.LogFormat)
+
+	falkor.Initialize(cfg)
+	defer falkor.GlobalClient.Close()
 
 	slog.Info("tatami starting",
 		"prefix", cfg.PrefixLabel,
