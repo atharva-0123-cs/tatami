@@ -4,11 +4,13 @@
 package app
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 
 	"github.com/gdamore/tcell/v2"
 
+	"github.com/atharva-0123-cs/tatami/falkor"
 	"github.com/atharva-0123-cs/tatami/window"
 )
 
@@ -190,6 +192,21 @@ func (a *App) handleKey(ev *tcell.EventKey) bool {
 				return true
 			case 'q':
 				a.shouldQuit = true
+				return true
+			case 't':
+				// FalkorDB Connection Test Command
+				if falkor.GlobalClient != nil {
+					// A simple cypher query to test connectivity:
+					// Create a dummy node and return it
+					res, err := falkor.GlobalClient.Query(context.Background(), "CREATE (:Test {name: 'tatami'}) RETURN 1")
+					if err != nil {
+						a.SetErrorMsg(fmt.Sprintf("FalkorDB Test Failed: %v", err))
+					} else {
+						a.SetErrorMsg(fmt.Sprintf("FalkorDB Test Success: %v", res))
+					}
+				} else {
+					a.SetErrorMsg("FalkorDB Client not initialized")
+				}
 				return true
 			case 'w':
 				a.wm.NextWindow()
