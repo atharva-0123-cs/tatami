@@ -5,9 +5,9 @@ Tatami is a terminal multiplexer with an integrated FalkorDB graph engine and a 
 ## 1. FalkorDB Graph Integration 
 
 ### FalkorDB Core & Client Setup
-- [ ] Implement FalkorDB connection manager using Redis/FalkorDB Go client.
-- [ ] Add configuration settings in `tatami.conf` for FalkorDB host, port, and credentials (`falkordb_host`, `falkordb_port`).
-- [ ] Add startup health-check and connection error handling.
+- [x] Implement FalkorDB connection manager using Redis/FalkorDB Go client.
+- [x] Add configuration settings in `tatami.conf` for FalkorDB host, port, and credentials (`falkordb_host`, `falkordb_port`).
+- [x] Add startup health-check and connection error handling.
 
 ### Codebase & Dependency Knowledge Graph
 - [ ] Implement AST parser / repository scanner for Go, Python, and JS/TS projects.
