@@ -9,6 +9,11 @@ output into a cell grid that is drawn straight into the tcell screen buffer.
 > layout trees. Expect rough edges, deliberate minimalism, and TODOs rather
 > than production polish.
 
+> **Hackathon submission.** The project submitted to the WeMakeDevs × FalkorDB
+> *Graph Hacks* hackathon lives on the **`hackton`** branch. Check it out with
+> `git checkout hackton` before building — `main` is the earlier standalone
+> multiplexer without the FalkorDB graph and agent-harness work.
+
 ## Features
 
 - Horizontal (`Ctrl+A c`) and vertical (`Ctrl+A C`) splits in a nested layout tree
@@ -29,6 +34,7 @@ output into a cell grid that is drawn straight into the tcell screen buffer.
 ## Build & run
 
 ```sh
+git checkout hackton      # the hackathon submission branch
 go build -o tatami .
 ./tatami
 ```
