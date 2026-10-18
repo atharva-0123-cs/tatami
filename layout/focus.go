@@ -91,7 +91,7 @@ func (wm *WindowManager) FocusAt(px, py, screenW, screenH int) bool {
 		wm.setFocus(wm.zoomed)
 		return true
 	}
-	found := wm.findPaneAt(wm.root, 0, 0, screenW, paneRegionH, px, py)
+	found := wm.findPaneAt(wm.root, 0, 0, screenW, paneRegionH, screenW, paneRegionH, px, py)
 	if found != nil {
 		wm.setFocus(found)
 		return true
@@ -100,7 +100,7 @@ func (wm *WindowManager) FocusAt(px, py, screenW, screenH int) bool {
 }
 
 // findPaneAt recursively walks the tree to find which pane occupies (px, py).
-func (wm *WindowManager) findPaneAt(n *window.Node, x0, y0, x1, y1, px, py int) *pane.Pane {
+func (wm *WindowManager) findPaneAt(n *window.Node, x0, y0, x1, y1, regionW, regionH, px, py int) *pane.Pane {
 	if n == nil {
 		return nil
 	}
@@ -108,10 +108,11 @@ func (wm *WindowManager) findPaneAt(n *window.Node, x0, y0, x1, y1, px, py int) 
 		if n.Pane == nil {
 			return nil
 		}
-		ix0 := x0 + wm.inset
-		iy0 := y0 + wm.inset
-		ix1 := x1 - wm.inset
-		iy1 := y1 - wm.inset
+		left, top, right, bottom := wm.edgeInsets(x0, y0, x1, y1, regionW, regionH)
+		ix0 := x0 + left
+		iy0 := y0 + top
+		ix1 := x1 - right
+		iy1 := y1 - bottom
 		if ix1 <= ix0 || iy1 <= iy0 {
 			return nil
 		}
@@ -140,11 +141,11 @@ func (wm *WindowManager) findPaneAt(n *window.Node, x0, y0, x1, y1, px, py int) 
 			continue
 		}
 		if horizontal {
-			if p := wm.findPaneAt(child, x0, pos0+sp[0], x1, pos0+sp[1], px, py); p != nil {
+			if p := wm.findPaneAt(child, x0, pos0+sp[0], x1, pos0+sp[1], regionW, regionH, px, py); p != nil {
 				return p
 			}
 		} else {
-			if p := wm.findPaneAt(child, pos0+sp[0], y0, pos0+sp[1], y1, px, py); p != nil {
+			if p := wm.findPaneAt(child, pos0+sp[0], y0, pos0+sp[1], y1, regionW, regionH, px, py); p != nil {
 				return p
 			}
 		}

@@ -56,6 +56,9 @@ Prefix: `Ctrl+A`, then:
 | `r`            | resize mode (`h` `j` `k` `l`)   |
 | `1`-`9`        | jump to pane N                  |
 | `[`            | copy mode (`j`/`k` scroll, `y` copy, `q`/Esc exit) |
+| `t`            | FalkorDB connectivity test      |
+| `g`            | index the working directory into FalkorDB |
+| `:`            | Cypher prompt (results in a scrollable overlay) |
 | `q`            | quit                            |
 
 `Esc` cancels prefix/resize/copy mode; any other key is forwarded to the shell.
@@ -63,6 +66,16 @@ When `mouse = on`, clicking a pane focuses it.
 
 The status bar lists all windows on the right; the active window is shown
 bracketed, e.g. `[1] 2 3`.
+
+## Code knowledge graph (FalkorDB)
+
+With a FalkorDB instance reachable (see `falkordb_host`/`falkordb_port` in
+`tatami.conf`), `Ctrl+A g` scans the working directory (Go, Python, JS/TS),
+builds a graph of projects, packages, files, imports, functions, structs,
+fields and variables, and ingests it into the configured graph. `Ctrl+A :`
+opens a Cypher prompt; type a raw `MATCH ... RETURN ...` query or a shortcut
+(`:files`, `:deps <path>`, `:callers <fn>`, `:chain <fn>`, ...), and the
+results appear in a scrollable overlay (`j`/`k` scroll, `q`/Esc close).
 
 ## Layout
 

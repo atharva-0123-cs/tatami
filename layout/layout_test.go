@@ -221,9 +221,30 @@ func TestGapGeometry(t *testing.T) {
 		t.Fatalf("default wm gap = %d (inset %d, overlap %d), want 1/1/1",
 			wm.PaneGap(), wm.inset, wm.overlap)
 	}
+	if wm.outer != 0 {
+		t.Fatalf("default outer margin = %d, want 0 (flush)", wm.outer)
+	}
 	wm.SetPaneGap(3)
 	if wm.PaneGap() != 3 || wm.overlap != 1 {
 		t.Fatalf("after SetPaneGap(3): gap=%d overlap=%d, want 3/1", wm.PaneGap(), wm.overlap)
+	}
+	if wm.outer != 1 {
+		t.Fatalf("SetPaneGap(3) outer margin = %d, want 1 (inset-1)", wm.outer)
+	}
+	// Edge sides get the outer margin; internal sides get the inset.
+	l, tp, r, b := wm.edgeInsets(0, 0, 40, 10, 80, 21)
+	if l != 1 || tp != 1 {
+		t.Fatalf("region-edge insets = left %d top %d, want 1/1", l, tp)
+	}
+	if r != wm.inset || b != wm.inset {
+		t.Fatalf("internal insets = right %d bottom %d, want %d", r, b, wm.inset)
+	}
+	l, tp, r, b = wm.edgeInsets(40, 5, 80, 21, 80, 21)
+	if r != 1 || b != 1 {
+		t.Fatalf("bottom-right region insets = right %d bottom %d, want 1/1", r, b)
+	}
+	if l != wm.inset || tp != wm.inset {
+		t.Fatalf("top-left internal insets = left %d top %d, want %d", l, tp, wm.inset)
 	}
 	// A wider gap overlaps less: two siblings in 20 columns split with overlap.
 	wm.SetPaneGap(2)
@@ -243,8 +264,8 @@ func TestFocusAt(t *testing.T) {
 	wm.FocusPane(panes[2])
 
 	// 3 stacked panes in an 80x(21+1) terminal. Each pane gets 7 rows of the
-	// pane region; after a 1-cell inset each pane occupies rows [1,6), [7,13),
-	// [14,20).
+	// pane region; internal edges inset by 1 cell, outer edges are flush, so
+	// the panes occupy rows [0,6), [7,13), [14,21).
 	screenW, screenH := 80, 22
 	if !wm.FocusAt(5, 2, screenW, screenH) {
 		t.Fatal("click in pane 1 should focus a pane")
@@ -272,8 +293,12 @@ func TestFocusAt(t *testing.T) {
 	if wm.FocusAt(5, 6, screenW, screenH) {
 		t.Fatal("click in the pane gap should not focus a pane")
 	}
-	// Click on the left border.
-	if wm.FocusAt(0, 2, screenW, screenH) {
-		t.Fatal("click on the left border should not focus a pane")
+	// With the default gap the outer margin is zero, so the leftmost column
+	// is the pane's own border and belongs to the pane.
+	if !wm.FocusAt(0, 2, screenW, screenH) {
+		t.Fatal("click on the flush left edge should focus a pane")
+	}
+	if wm.FocusedPane() != panes[0] {
+		t.Fatal("click on the flush left edge should focus pane 1")
 	}
 }

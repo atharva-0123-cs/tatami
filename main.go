@@ -2,9 +2,11 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"os"
+	"time"
 
 	"github.com/atharva-0123-cs/tatami/config"
 	"github.com/atharva-0123-cs/tatami/falkor"
@@ -45,6 +47,19 @@ func main() {
 	setupLogger(f, cfg.LogLevel, cfg.LogFormat)
 
 	falkor.Initialize(cfg)
+
+	// Startup health check: probe FalkorDB once (with a couple of retries) and
+	// report the result. A missing graph database is never fatal — graph
+	// features simply reconnect on demand.
+	healthCtx, cancelHealth := context.WithTimeout(context.Background(), 10*time.Second)
+	if err := falkor.GlobalClient.Startup(healthCtx); err != nil {
+		slog.Warn("falkordb unavailable at startup; graph features will retry on demand",
+			"addr", falkor.GlobalClient.Addr(), "err", err)
+	} else {
+		slog.Info("falkordb ready at startup", "graph", falkor.GlobalClient.GraphName())
+	}
+	cancelHealth()
+
 	defer falkor.GlobalClient.Close()
 
 	slog.Info("tatami starting",

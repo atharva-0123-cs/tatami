@@ -38,9 +38,12 @@ type WindowManager struct {
 
 	window.Registry // ordered list of windows; active one at CurrentWin
 
-	gap     int // gutter (in cells) between adjacent panes, also the outer margin basis
-	inset   int // per-pane inset on every side (derived from gap)
+	gap     int // gutter (in cells) between adjacent panes
+	inset   int // per-pane inset on internal sides (derived from gap)
 	overlap int // span overlap on shared split edges (derived from gap)
+	outer   int // per-pane margin on screen-edge sides (derived from gap)
+
+	statusExtra string // short, subsystem-provided indicator for the status bar
 }
 
 // NewWindowManager creates a new WindowManager.
@@ -56,15 +59,49 @@ func NewWindowManager() *WindowManager {
 	return wm
 }
 
+// Root returns the active window's root layout node.
+func (wm *WindowManager) Root() *window.Node { return wm.root }
+
 // PaneGap returns the configured gutter width (in cells) between panes.
 func (wm *WindowManager) PaneGap() int { return wm.gap }
+
+// SetStatusExtra sets a short indicator appended to the status bar's right
+// side (for example a subsystem health label). An empty string hides it. The
+// value takes effect on the next Draw.
+func (wm *WindowManager) SetStatusExtra(s string) { wm.statusExtra = s }
 
 // SetPaneGap configures the gutter between adjacent panes in cells (0 means
 // panes share a border). The per-pane inset and the shared-edge span overlap
 // are derived from it so the visible gutter lands exactly on the requested
-// width while the outer margin matches the inset.
+// width. The outer margin (the space between a pane and the screen edge) is one
+// cell smaller than the inset, so panes sit close to the edges; at the smallest
+// gaps the outer margin is zero and panes are flush with the screen.
 func (wm *WindowManager) SetPaneGap(g int) {
 	wm.gap, wm.inset, wm.overlap = gapGeometry(g)
+	wm.outer = wm.inset - 1
+	if wm.outer < 0 {
+		wm.outer = 0
+	}
+}
+
+// edgeInsets returns the per-side insets for a leaf rectangle. Sides lying on
+// the pane region boundary (x0==0, y0==0, x1==regionW, y1==regionH) get the
+// smaller outer margin; internal sides get the gutter inset.
+func (wm *WindowManager) edgeInsets(x0, y0, x1, y1, regionW, regionH int) (left, top, right, bottom int) {
+	left, top, right, bottom = wm.inset, wm.inset, wm.inset, wm.inset
+	if x0 == 0 {
+		left = wm.outer
+	}
+	if y0 == 0 {
+		top = wm.outer
+	}
+	if x1 == regionW {
+		right = wm.outer
+	}
+	if y1 == regionH {
+		bottom = wm.outer
+	}
+	return left, top, right, bottom
 }
 
 // FocusedPane returns the currently focused pane, or nil.

@@ -2,46 +2,58 @@ package falkor
 
 import (
 	"fmt"
+	"strconv"
 
 	"github.com/atharva-0123-cs/tatami/layout"
 	"github.com/atharva-0123-cs/tatami/window"
 )
 
-// LayoutToCypher generates a series of Cypher statements to represent the current layout tree.
+// LayoutToCypher generates Cypher statements that represent the active
+// window's layout tree (window -> root node -> panes/containers). It builds a
+// Graph so node IDs and property escaping stay consistent with the code graph.
 func LayoutToCypher(wm *layout.WindowManager) []string {
-	var statements []string
-	
-	// Clear existing graph (optional: for session persistence we might only update)
-	statements = append(statements, "GRAPH.QUERY tatami 'MATCH (n) DETACH DELETE n'")
+	g := NewGraph()
 
-	// Create Window
-	statements = append(statements, fmt.Sprintf("GRAPH.QUERY tatami 'CREATE (:Window {id: \"win-%d\", name: \"%s\"})'", wm.WindowIndex(), wm.WindowName()))
-	
-	// Start recursive tree mapping
-	if root := wm.Root(); root != nil {
-		nodeID := "node-0"
-		statements = append(statements, fmt.Sprintf("GRAPH.QUERY tatami 'MATCH (w:Window {id: \"win-%d\"}) CREATE (n:Node {id: \"%s\"}) CREATE (w)-[:ROOT]->(n)'", wm.WindowIndex(), nodeID))
-		statements = append(statements, mapNode(nodeID, root)...)
+	winID := fmt.Sprintf("window://%d", wm.WindowIndex())
+	g.AddNode(Node{ID: winID, Label: LabelWindow, Props: map[string]string{
+		"name":  wm.WindowName(),
+		"index": strconv.Itoa(wm.WindowIndex()),
+	}})
+
+	root := wm.Root()
+	if root == nil {
+		return g.Cypher()
 	}
-	
-	return statements
+
+	rootID := "node-0"
+	if root.Leaf {
+		if root.Pane != nil {
+			g.AddNode(Node{ID: rootID, Label: LabelPane, Props: map[string]string{"name": root.Pane.Name()}})
+		}
+		g.AddEdge(winID, rootID, RelRoot)
+		return g.Cypher()
+	}
+
+	g.AddNode(Node{ID: rootID, Label: LabelNode, Props: map[string]string{"type": "container"}})
+	g.AddEdge(winID, rootID, RelRoot)
+	mapNode(g, rootID, root, rootID)
+	return g.Cypher()
 }
 
-func mapNode(nodeID string, n *window.Node) []string {
-	var stmts []string
-	
+// mapNode recursively maps a container's children under parentID.
+func mapNode(g *Graph, parentID string, n *window.Node, nodeID string) {
 	for i, child := range n.Children {
 		childID := fmt.Sprintf("%s-c%d", nodeID, i)
-		
 		if child.Leaf {
-			// Map Pane
-			stmts = append(stmts, fmt.Sprintf("GRAPH.QUERY tatami 'MATCH (p:Node {id: \"%s\"}) CREATE (c:Pane {id: \"%s\", name: \"%s\"}) CREATE (p)-[:CHILD]->(c)'", nodeID, childID, child.Pane.Name()))
-		} else {
-			// Map Container Node
-			stmts = append(stmts, fmt.Sprintf("GRAPH.QUERY tatami 'MATCH (p:Node {id: \"%s\"}) CREATE (c:Node {id: \"%s\", type: \"container\"}) CREATE (p)-[:CHILD]->(c)'", nodeID, childID))
-			stmts = append(stmts, mapNode(childID, child)...)
+			if child.Pane == nil {
+				continue
+			}
+			g.AddNode(Node{ID: childID, Label: LabelPane, Props: map[string]string{"name": child.Pane.Name()}})
+			g.AddEdge(parentID, childID, RelChild)
+			continue
 		}
+		g.AddNode(Node{ID: childID, Label: LabelNode, Props: map[string]string{"type": "container"}})
+		g.AddEdge(parentID, childID, RelChild)
+		mapNode(g, childID, child, childID)
 	}
-	
-	return stmts
 }

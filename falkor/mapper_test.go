@@ -19,13 +19,13 @@ func TestLayoutToCypher(t *testing.T) {
 	
 	found := false
 	for _, s := range stmts {
-		if strings.Contains(s, "CREATE (c:Pane") {
+		if strings.Contains(s, ":Pane") {
 			found = true
 			break
 		}
 	}
-	
+
 	if !found {
-		t.Errorf("Cypher did not contain CREATE (c:Pane statement. Statements: %v", stmts)
+		t.Errorf("Cypher did not contain a :Pane node. Statements: %v", stmts)
 	}
 }

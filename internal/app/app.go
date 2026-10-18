@@ -9,6 +9,7 @@
 package app
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"os"
@@ -38,6 +39,14 @@ type App struct {
 	copyOffset   int  // scroll offset in copy mode (lines from bottom)
 	errorMsg     string
 	shouldQuit   bool
+
+	// FalkorDB graph prompt state (see graph.go).
+	graphMode   graphModeKind
+	graphBuf    string
+	graphResult string
+	graphScroll int
+
+	graphCancel context.CancelFunc // stops the background FalkorDB health monitor
 }
 
 // New creates the screen, starts the layout with the configured pane gap and
@@ -88,7 +97,9 @@ func New(cfg *config.Config) (*App, error) {
 func (a *App) Render() {
 	a.screen.Clear()
 	w, h := a.screen.Size()
+	a.wm.SetStatusExtra(a.graphStatusLabel())
 	a.wm.Draw(a.screen, w, h, a.prefixActive, a.resizeMode, a.copyMode, a.errorMsg, a.style)
+	a.renderGraphOverlay()
 	a.screen.Show()
 }
 
@@ -101,6 +112,7 @@ func (a *App) SetErrorMsg(msg string) { a.errorMsg = msg }
 // last pane closed, or the final dead pane swept).
 func (a *App) Run() {
 	a.Render()
+	a.startGraphMonitor()
 
 	for !a.shouldQuit {
 		ev := a.screen.PollEvent()
@@ -164,6 +176,10 @@ func (a *App) Run() {
 // was initialized), and restores the terminal to its original state. It is
 // safe to call multiple times.
 func (a *App) Cleanup() {
+	if a.graphCancel != nil {
+		a.graphCancel()
+		a.graphCancel = nil
+	}
 	if a.wm != nil {
 		for _, p := range a.wm.CollectAllPanes() {
 			_ = p.Close()

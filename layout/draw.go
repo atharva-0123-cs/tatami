@@ -59,7 +59,7 @@ func (wm *WindowManager) Draw(screen tcell.Screen, width, height int, prefixActi
 			cursorVisible = true
 		}
 	} else {
-		cx, cy, hasCursor := wm.distribute(wm.root, 0, 0, width, paneRegionH, screen)
+		cx, cy, hasCursor := wm.distribute(wm.root, 0, 0, width, paneRegionH, width, paneRegionH, screen)
 		if hasCursor {
 			cursorX, cursorY = cx, cy
 			cursorVisible = true
@@ -83,13 +83,14 @@ func (wm *WindowManager) Draw(screen tcell.Screen, width, height int, prefixActi
 // weight using seamSpans: horizontal splits stack children top-to-bottom (each
 // child gets a band of height avail*size/total, the last child absorbing
 // rounding remainder), vertical splits lay children out left-to-right the same
-// way for widths. Leaves inset their assigned rectangle by the window's gap
-// inset on every side so adjacent panes are separated by a thin gutter. The
-// focused pane's cursor coordinates bubble up to Draw.
+// way for widths. Leaves inset their assigned rectangle on internal sides by
+// the window's gap inset (and on screen-edge sides by the smaller outer margin)
+// so adjacent panes are separated by a thin gutter while staying close to the
+// screen edges. The focused pane's cursor coordinates bubble up to Draw.
 //
 // distribute returns (cursorX, cursorY, hasCursor); hasCursor is true only for
 // the focused pane's draw when its cursor is visible.
-func (wm *WindowManager) distribute(n *window.Node, x0, y0, x1, y1 int, screen tcell.Screen) (cursorX, cursorY int, hasCursor bool) {
+func (wm *WindowManager) distribute(n *window.Node, x0, y0, x1, y1, regionW, regionH int, screen tcell.Screen) (cursorX, cursorY int, hasCursor bool) {
 	if n == nil {
 		return 0, 0, false
 	}
@@ -97,12 +98,13 @@ func (wm *WindowManager) distribute(n *window.Node, x0, y0, x1, y1 int, screen t
 		if n.Pane == nil {
 			return 0, 0, false
 		}
-		// Inset by wm.inset on all sides to create visible separation
-		// between adjacent panes (and from the screen edge).
-		ix0 := x0 + wm.inset
-		iy0 := y0 + wm.inset
-		ix1 := x1 - wm.inset
-		iy1 := y1 - wm.inset
+		// Inset to create visible separation between adjacent panes; sides on
+		// the screen edge use the smaller outer margin.
+		left, top, right, bottom := wm.edgeInsets(x0, y0, x1, y1, regionW, regionH)
+		ix0 := x0 + left
+		iy0 := y0 + top
+		ix1 := x1 - right
+		iy1 := y1 - bottom
 		if ix1 <= ix0 || iy1 <= iy0 {
 			return 0, 0, false
 		}
@@ -136,12 +138,12 @@ func (wm *WindowManager) distribute(n *window.Node, x0, y0, x1, y1 int, screen t
 			continue
 		}
 		if horizontal {
-			cx, cy, hc := wm.distribute(child, x0, pos0+sp[0], x1, pos0+sp[1], screen)
+			cx, cy, hc := wm.distribute(child, x0, pos0+sp[0], x1, pos0+sp[1], regionW, regionH, screen)
 			if hc {
 				cursorX, cursorY, hasCursor = cx, cy, true
 			}
 		} else {
-			cx, cy, hc := wm.distribute(child, pos0+sp[0], y0, pos0+sp[1], y1, screen)
+			cx, cy, hc := wm.distribute(child, pos0+sp[0], y0, pos0+sp[1], y1, regionW, regionH, screen)
 			if hc {
 				cursorX, cursorY, hasCursor = cx, cy, true
 			}
@@ -153,14 +155,14 @@ func (wm *WindowManager) distribute(n *window.Node, x0, y0, x1, y1 int, screen t
 // gapGeometry derives the per-pane inset and shared-edge overlap from a
 // requested gutter width.
 //
-// Leaves inset their rectangle by inset on every side and sibling spans within
-// one container overlap by overlap cells on their shared edge (seamSpans), so
-// two adjacent panes leave exactly
+// Leaves inset their rectangle by inset on internal sides and sibling spans
+// within one container overlap by overlap cells on their shared edge
+// (seamSpans), so two adjacent panes leave exactly
 //
 //	gutter = 2*inset - overlap
 //
-// empty cells between their borders. The inset also becomes the outer margin,
-// so the smallest sensible gap (1) yields the classic thin border.
+// empty cells between their borders (see edgeInsets for the smaller margin used
+// on screen-edge sides).
 func gapGeometry(g int) (gap, inset, overlap int) {
 	if g < 0 {
 		g = 0
@@ -257,7 +259,7 @@ func (wm *WindowManager) renderStatus(screen tcell.Screen, maxX, maxY int, prefi
 	} else if resizeMode {
 		left += "| [RESIZE] h/j/k/l to resize, Esc to cancel "
 	} else if prefixActive {
-		left += "| [PREFIX] c:h-split C:v-split n:new-win w:next Win W/p:prev-win x:close z:zoom 1-9:jump q:quit "
+		left += "| [PREFIX] c:h-split C:v-split n:new-win w:next Win W/p:prev-win x:close z:zoom 1-9:jump g:index :cypher q:quit "
 	} else {
 		left += fmt.Sprintf("| Prefix: %s then commands... ", style.PrefixLabel)
 	}
@@ -292,7 +294,14 @@ func (wm *WindowManager) renderStatus(screen tcell.Screen, maxX, maxY int, prefi
 	if wm.zoomed != nil {
 		right += " [ZOOM]"
 	}
-	right += " "
+	if wm.statusExtra != "" {
+		if right != "" {
+			right += "| "
+		}
+		right += wm.statusExtra + " "
+	} else {
+		right += " "
+	}
 
 	fg := style.Fg
 	bg := style.Bg

@@ -1,20 +1,20 @@
 # Tatami TODO
 
-Tatami is a terminal multiplexer with an integrated FalkorDB graph engine and a roadmap toward agent-aware development workflows.
+Tatami is a terminal multiplexer with an integrated FalkorDB graph engine.
 
-## 1. FalkorDB Graph Integration 
+## 1. FalkorDB Graph Integration (https://docs.falkordb.com/)
 
 ### FalkorDB Core & Client Setup
 - [x] Implement FalkorDB connection manager using Redis/FalkorDB Go client.
 - [x] Add configuration settings in `tatami.conf` for FalkorDB host, port, and credentials (`falkordb_host`, `falkordb_port`).
-- [x] Add startup health-check and connection error handling.
+- [] Add startup health-check and connection error handling.
 
 ### Codebase & Dependency Knowledge Graph
-- [ ] Implement AST parser / repository scanner for Go, Python, and JS/TS projects.
-- [ ] Ingest code structures (Files, Functions, Structs, Imports) into FalkorDB graph.
-- [ ] Implement Cypher query parser and execution engine.
-- [ ] Add a Cypher Query interactive TUI pane / command prompt in Tatami.
-- [ ] Support graph-based dependency & call-chain traversals (`MATCH ... RETURN ...`).
+- [x] Implement AST parser / repository scanner for Go, Python, and JS/TS projects.
+- [x] Ingest code structures (Files, Functions, Structs, Imports) into FalkorDB graph.
+- [x] Implement Cypher query parser and execution engine.
+- [x] Add a Cypher Query interactive TUI pane / command prompt in Tatami.
+- [x] Support graph-based dependency & call-chain traversals (`MATCH ... RETURN ...`).
 
 ### Persistent Workspace & Process Graph
 - [ ] Model windows, layout trees (splits), active panes, and working directories as graph nodes in FalkorDB.

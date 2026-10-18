@@ -32,6 +32,14 @@ import (
 //     simply ends prefix mode without an action.
 //  5. Otherwise the event is forwarded to the shell.
 func (a *App) handleKey(ev *tcell.EventKey) bool {
+	// Graph overlays are modal: they consume every key while open.
+	if a.graphMode == graphInput {
+		return a.handleGraphInput(ev)
+	}
+	if a.graphMode == graphResultMode {
+		return a.handleGraphResult(ev)
+	}
+
 	// Escape cancels prefix and resize mode.
 	if ev.Key() == tcell.KeyEsc {
 		if a.copyMode {
@@ -207,6 +215,14 @@ func (a *App) handleKey(ev *tcell.EventKey) bool {
 				} else {
 					a.SetErrorMsg("FalkorDB Client not initialized")
 				}
+				return true
+			case ':':
+				// Open the Cypher query prompt (graph.go).
+				a.openGraphPrompt()
+				return true
+			case 'g':
+				// Index the working directory into FalkorDB.
+				a.indexProject()
 				return true
 			case 'w':
 				a.wm.NextWindow()
