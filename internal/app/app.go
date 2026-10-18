@@ -13,13 +13,19 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"sync"
+	"time"
 
 	"github.com/gdamore/tcell/v2"
 
+	"github.com/atharva-0123-cs/tatami/agent"
 	"github.com/atharva-0123-cs/tatami/config"
 	"github.com/atharva-0123-cs/tatami/layout"
 	"github.com/atharva-0123-cs/tatami/pane"
 )
+
+// wheelStep is how many lines one mouse-wheel notch scrolls a pane.
+const wheelStep = 3
 
 // App holds the running multiplexer: the tcell screen, the layout tree, and
 // the per-loop UI state that used to be package-level variables.
@@ -27,10 +33,10 @@ import (
 // All fields are only read or written on the main goroutine inside Run (or by
 // render), so no locks are needed.
 type App struct {
-	screen     tcell.Screen
-	wm         *layout.WindowManager
-	prefixKey  tcell.Key
-	style      layout.StatusStyle
+	screen    tcell.Screen
+	wm        *layout.WindowManager
+	prefixKey tcell.Key
+	style     layout.StatusStyle
 
 	prefixActive bool // prefix mode is armed
 	resizeMode   bool // resize mode (prefix+r) is armed
@@ -42,11 +48,59 @@ type App struct {
 
 	// FalkorDB graph prompt state (see graph.go).
 	graphMode   graphModeKind
+	graphAction graphActionKind
 	graphBuf    string
 	graphResult string
 	graphScroll int
 
+	// Graph prompt TAB-completion state (see graph.go). graphCompActive is
+	// true while the user is cycling a candidate list; any edit resets it.
+	graphCompActive bool
+	graphCompHead   string   // buffer text before the token being completed
+	graphCompItems  []string // candidates captured on the first TAB
+	graphCompIdx    int      // index of the applied candidate
+	overlayTitle    string   // title shown in the result overlay ("Graph result", ...)
+
 	graphCancel context.CancelFunc // stops the background FalkorDB health monitor
+	clockCancel context.CancelFunc // stops the status-bar clock ticker
+	gitCancel   context.CancelFunc // stops the background Git monitor
+
+	lastStateWrite time.Time // when the live session state was last mirrored
+
+	// Git state for the focused pane, refreshed by the background monitor.
+	gitMu       sync.Mutex
+	gitSummary  string
+	gitRepoRoot string
+
+	// Built-in agent harness, registry, event bus and pane controller.
+	harness    *agent.Harness
+	registry   *agent.Registry
+	events     *agent.EventBus
+	controller *agent.Controller
+
+	// Command mode (see command.go).
+	cmdMode    bool
+	cmdBuf     string
+	cmdHistory []string
+	cmdHistIdx int
+
+	// In-progress Tab completion for command mode: the buffer prefix before
+	// the word being completed, the candidate list, and the selected index.
+	cmdCompActive bool
+	cmdCompHead   string
+	cmdCompItems  []string
+	cmdCompIdx    int
+
+	// Pane picker / search overlay (see picker.go).
+	pickKind    pickKind
+	pickItems   []pickItem
+	pickIndex   int
+	pickTop     int
+	searchBuf   string
+	searchPhase int
+
+	// Per-window synchronized-input flags, keyed by window name.
+	syncWindows map[string]bool
 }
 
 // New creates the screen, starts the layout with the configured pane gap and
@@ -55,6 +109,13 @@ type App struct {
 // The caller is responsible for calling Cleanup (even on error) to restore the
 // terminal; screen.Init may already have switched the real terminal's modes.
 func New(cfg *config.Config) (*App, error) {
+	return NewFromSession(cfg, nil)
+}
+
+// NewFromSession is New with an optional startup layout: when restore is
+// non-nil the workspace is rebuilt from it instead of starting with a single
+// pane. It is used by `tatami restore`.
+func NewFromSession(cfg *config.Config, restore *layout.SessionSpec) (*App, error) {
 	a := &App{
 		prefixKey: cfg.PrefixKey,
 		style: layout.StatusStyle{
@@ -84,12 +145,47 @@ func New(cfg *config.Config) (*App, error) {
 
 	a.wm = layout.NewWindowManager()
 	a.wm.SetPaneGap(cfg.PaneGap)
-	if err := a.wm.NewPane(); err != nil {
+	if restore != nil {
+		if err := a.wm.Restore(restore); err != nil {
+			a.Cleanup()
+			return nil, fmt.Errorf("error restoring session: %w", err)
+		}
+	} else if err := a.wm.NewPane(); err != nil {
 		a.Cleanup()
 		return nil, fmt.Errorf("error creating initial pane: %w", err)
 	}
 
+	a.initAgent()
+	a.forceWriteLiveState()
 	return a, nil
+}
+
+// initAgent wires the built-in coding-agent harness, its event bus, and the
+// permission-checked pane controller. The harness's working directory follows
+// the focused pane so its environment/project detection reflects what the user
+// is looking at.
+func (a *App) initAgent() {
+	cwd, err := os.Getwd()
+	if err != nil {
+		cwd = "/"
+	}
+	a.syncWindows = map[string]bool{}
+	a.events = agent.NewEventBus()
+	a.registry = agent.NewRegistry()
+	if _, err := a.registry.Start("tatami", cwd, agent.Policy{}, ""); err != nil {
+		a.harness = agent.New(cwd, agent.Policy{})
+	} else {
+		a.harness = a.registry.Active().Harness
+	}
+	a.controller = agent.NewController(a.wm, agent.ControlPolicy{
+		AllowCreatePane:   true,
+		AllowCreateWindow: true,
+		AllowClose:        true,
+		AllowSendInput:    true,
+		AllowReadOutput:   true,
+		AllowResize:       true,
+		AllowSelect:       true,
+	})
 }
 
 // Render draws the whole screen: clears it, draws the layout and status bar,
@@ -97,10 +193,11 @@ func New(cfg *config.Config) (*App, error) {
 func (a *App) Render() {
 	a.screen.Clear()
 	w, h := a.screen.Size()
-	a.wm.SetStatusExtra(a.graphStatusLabel())
+	a.wm.SetStatusExtra(a.statusExtra())
 	a.wm.Draw(a.screen, w, h, a.prefixActive, a.resizeMode, a.copyMode, a.errorMsg, a.style)
 	a.renderGraphOverlay()
 	a.screen.Show()
+	a.maybeWriteLiveState()
 }
 
 // SetErrorMsg records a single status-bar message. It is shown on the next
@@ -108,11 +205,36 @@ func (a *App) Render() {
 // start of every EventKey dispatch).
 func (a *App) SetErrorMsg(msg string) { a.errorMsg = msg }
 
+// startClock launches a background goroutine that wakes the UI once a minute so
+// the status-bar clock stays current. Like the PTY readers it never touches the
+// screen: it only calls pane.Interrupt to post an EventInterrupt.
+func (a *App) startClock() {
+	ctx, cancel := context.WithCancel(context.Background())
+	a.clockCancel = cancel
+	go func() {
+		ticker := time.NewTicker(time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if ctx.Err() != nil {
+					return
+				}
+				pane.Interrupt()
+			}
+		}
+	}()
+}
+
 // Run is the main event loop. It returns when quit is requested (prefix+q, the
 // last pane closed, or the final dead pane swept).
 func (a *App) Run() {
 	a.Render()
 	a.startGraphMonitor()
+	a.startClock()
+	a.startGitMonitor()
 
 	for !a.shouldQuit {
 		ev := a.screen.PollEvent()
@@ -152,10 +274,25 @@ func (a *App) Run() {
 
 		case *tcell.EventMouse:
 			buttons := ev.Buttons()
+			px, py := ev.Position()
+			sw, sh := a.screen.Size()
 			if buttons&tcell.ButtonPrimary != 0 {
-				px, py := ev.Position()
-				sw, sh := a.screen.Size()
 				if a.wm.FocusAt(px, py, sw, sh) {
+					a.Render()
+				}
+			}
+			// Mouse wheel scrolls the hovered pane into its scrollback (and
+			// arms copy mode); it only applies when mouse reporting is on,
+			// which is how tcell delivers wheel events at all.
+			switch {
+			case buttons&tcell.WheelUp != 0:
+				if a.wm.FocusAt(px, py, sw, sh) {
+					a.ScrollWheel(-wheelStep)
+					a.Render()
+				}
+			case buttons&tcell.WheelDown != 0:
+				if a.wm.FocusAt(px, py, sw, sh) {
+					a.ScrollWheel(wheelStep)
 					a.Render()
 				}
 			}
@@ -179,6 +316,14 @@ func (a *App) Cleanup() {
 	if a.graphCancel != nil {
 		a.graphCancel()
 		a.graphCancel = nil
+	}
+	if a.clockCancel != nil {
+		a.clockCancel()
+		a.clockCancel = nil
+	}
+	if a.gitCancel != nil {
+		a.gitCancel()
+		a.gitCancel = nil
 	}
 	if a.wm != nil {
 		for _, p := range a.wm.CollectAllPanes() {

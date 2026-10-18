@@ -12,8 +12,10 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/atharva-0123-cs/tatami/term"
@@ -40,6 +42,8 @@ var Interrupt = func() {}
 // (e.g. bracketed-paste delimiters) never interleave mid-sequence.
 type Pane struct {
 	name    string
+	id      string // stable, process-wide unique identifier
+	cwd     string // working directory the shell was started in
 	pty     *os.File
 	cmd     *exec.Cmd
 	ptyMtx  sync.Mutex
@@ -52,8 +56,11 @@ type Pane struct {
 	x0, y0  int
 	x1, y1  int
 	term    *term.Terminal // emulated screen
-	lg      *slog.Logger  // structured logger tagged with the pane id
+	lg      *slog.Logger   // structured logger tagged with the pane id
 }
+
+// nextPaneID hands out monotonically increasing pane identifiers.
+var nextPaneID atomic.Uint64
 
 // NewPane creates a new pane and starts a shell in a PTY.
 //
@@ -67,17 +74,38 @@ type Pane struct {
 // exits (closing p.done). NewPane fails only if no candidate shell could be
 // started.
 func NewPane(label string) (*Pane, error) {
-	p := &Pane{
-		name: "pane-" + label,
-		done: make(chan struct{}),
-	}
-	p.lg = slog.With("pane", p.label())
-
 	cwd, err := os.Getwd()
 	if err != nil {
 		cwd = "/"
-		p.log().Warn("could not get working directory, defaulting to /", "err", err)
 	}
+	return newPane(label, cwd)
+}
+
+// NewPaneInDir creates a pane whose shell starts in the given working
+// directory. An empty (or unresolvable) directory falls back to the process's
+// current directory, so restore never fails on a vanished path.
+func NewPaneInDir(label, cwd string) (*Pane, error) {
+	if cwd == "" {
+		if got, err := os.Getwd(); err == nil {
+			cwd = got
+		}
+	}
+	if info, err := os.Stat(cwd); err != nil || !info.IsDir() {
+		if got, gerr := os.Getwd(); gerr == nil {
+			cwd = got
+		}
+	}
+	return newPane(label, cwd)
+}
+
+func newPane(label, cwd string) (*Pane, error) {
+	p := &Pane{
+		name: "pane-" + label,
+		id:   fmt.Sprintf("pane-%d", nextPaneID.Add(1)),
+		done: make(chan struct{}),
+	}
+	p.lg = slog.With("pane", p.label())
+	p.cwd = cwd
 
 	master, startCmd, err := spawnShell(cwd)
 	if err != nil {
@@ -143,7 +171,76 @@ func (p *Pane) setDead(msg string) {
 }
 
 // Name returns the pane's identifier.
-func (p *Pane) Name() string { return p.name }
+func (p *Pane) Name() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.name
+}
+
+// SetName gives the pane a user-visible name (used by pane naming and by agents
+// that want a stable label). An empty name is ignored.
+func (p *Pane) SetName(name string) {
+	if name == "" {
+		return
+	}
+	p.mu.Lock()
+	p.name = name
+	p.mu.Unlock()
+}
+
+// ID returns a stable, process-wide unique identifier for the pane. Unlike the
+// display name it never changes and is safe to use as a graph node key or a
+// log correlation field.
+func (p *Pane) ID() string { return p.id }
+
+// Pid returns the process id of the pane's shell, or 0 when there is none.
+func (p *Pane) Pid() int {
+	if p.cmd == nil || p.cmd.Process == nil {
+		return 0
+	}
+	return p.cmd.Process.Pid
+}
+
+// Cwd returns the shell's current working directory. It prefers the live
+// directory of the child process (via /proc on Linux) and falls back to the
+// directory the shell was started in when that cannot be read.
+func (p *Pane) Cwd() string {
+	if pid := p.Pid(); pid > 0 {
+		if target, err := os.Readlink(fmt.Sprintf("/proc/%d/cwd", pid)); err == nil {
+			return target
+		}
+	}
+	return p.cwd
+}
+
+// ParentPid returns the process id of the shell's parent, read from
+// /proc/<pid>/stat, or 0 when it cannot be determined.
+func (p *Pane) ParentPid() int {
+	pid := p.Pid()
+	if pid <= 0 {
+		return 0
+	}
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return 0
+	}
+	// Format: pid (comm) state ppid ...  comm may contain spaces/parens, so
+	// parse from the last ')'.
+	s := string(data)
+	close := strings.LastIndexByte(s, ')')
+	if close < 0 || close+2 >= len(s) {
+		return 0
+	}
+	fields := strings.Fields(s[close+1:])
+	if len(fields) < 2 {
+		return 0
+	}
+	ppid, err := strconv.Atoi(fields[1])
+	if err != nil {
+		return 0
+	}
+	return ppid
+}
 
 // Title returns the window title set by the shell via OSC 0/2, or "".
 func (p *Pane) Title() string {
@@ -153,6 +250,17 @@ func (p *Pane) Title() string {
 		return ""
 	}
 	return p.term.Title()
+}
+
+// Text returns the pane's full screen contents (including scrollback) as plain
+// text. It is used by the agent harness to read pane output.
+func (p *Pane) Text() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.term == nil {
+		return ""
+	}
+	return p.term.AllText()
 }
 
 // Scroll sets the copy-mode scroll offset (lines of scrollback shown above the
@@ -174,6 +282,24 @@ func (p *Pane) ScrollOffset() int {
 		return 0
 	}
 	return p.term.ScrollOffset()
+}
+
+// ScrollbackLen reports how many lines of scrollback the pane retains.
+func (p *Pane) ScrollbackLen() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.term == nil {
+		return 0
+	}
+	return p.term.ScrollbackLen()
+}
+
+// Height reports the pane's inner text height in rows (the grid, excluding the
+// one-cell border). It is zero until the pane has been drawn once.
+func (p *Pane) Height() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.height
 }
 
 // IsDead reports whether the underlying process has terminated.
@@ -212,8 +338,20 @@ func (p *Pane) Close() error {
 	if p.pty != nil {
 		if err := p.pty.Close(); err != nil {
 			p.log().Error("error closing PTY", "err", err)
+			p.closeTerm()
 			return err
 		}
 	}
+	p.closeTerm()
 	return nil
+}
+
+// closeTerm shuts down the emulator's responder goroutine.
+func (p *Pane) closeTerm() {
+	p.mu.Lock()
+	term := p.term
+	p.mu.Unlock()
+	if term != nil {
+		term.Close()
+	}
 }

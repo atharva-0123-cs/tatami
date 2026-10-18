@@ -17,6 +17,22 @@ var builtinQueries = map[string]string{
 	"callers":   `MATCH (fn:Function)<-[:CALLS]-(caller:Function) RETURN fn.name AS function, count(caller) AS callers ORDER BY callers DESC LIMIT 25`,
 	"calls":     `MATCH (fn:Function)-[:CALLS]->(callee:Function) RETURN fn.name AS caller, callee.name AS callee ORDER BY caller LIMIT 100`,
 	"chain":     `MATCH p=(a:Function)-[:CALLS*1..4]->(b:Function) RETURN a.name AS from, b.name AS to, length(p) AS depth ORDER BY depth LIMIT 100`,
+
+	// Multi-agent shared memory.
+	"agents":   `MATCH (a:Agent) RETURN a.id AS agent, a.role AS role ORDER BY agent`,
+	"findings": `MATCH (a:Agent)-[:FOUND]->(f:Finding)-[:REPORTS]->(b:Bug) RETURN a.id AS agent, f.text AS finding, b.severity AS severity ORDER BY agent`,
+	"bugs":     `MATCH (b:Bug) WHERE b.status = "open" OPTIONAL MATCH (b)-[:AFFECTS]->(file:File) RETURN b.id AS bug, b.severity AS severity, b.description AS description, file.path AS file ORDER BY severity`,
+	"tasks":    `MATCH (t:Task) OPTIONAL MATCH (a:Agent)-[:ASSIGNED_TO]->(t) RETURN t.id AS task, t.status AS status, a.id AS owner ORDER BY task`,
+
+	// Semantic terminal history.
+	"history":  `MATCH (c:Command) RETURN c.command AS command, c.exit_code AS exit_code, c.status AS status ORDER BY c.timestamp DESC LIMIT 50`,
+	"failures": `MATCH (c:Command {status: "failed"}) RETURN c.command AS command, c.exit_code AS exit_code, c.summary AS summary ORDER BY c.timestamp DESC LIMIT 25`,
+	"fixes":    `MATCH (fail:Command {status: "failed"})-[:AFFECTED]->(f:File)<-[:AFFECTED]-(ok:Command {status: "ok"}) WHERE fail.command <> ok.command RETURN f.path AS file, fail.command AS failing, ok.command AS fixing LIMIT 50`,
+
+	// Workspace/process graph.
+	"sessions": `MATCH (s:Session) RETURN s.name AS session ORDER BY session`,
+	"panes":    `MATCH (w:Window)-[*]->(p:Pane) RETURN w.name AS window, p.cwd AS cwd, p.pid AS pid ORDER BY window`,
+	"procs":    `MATCH (parent:Process)-[:CHILD_PROCESS]->(child:Process) RETURN parent.pid AS parent, child.pid AS child, child.command AS command ORDER BY parent`,
 }
 
 // BuiltinNames returns the available ":name" shortcuts, sorted.

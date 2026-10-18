@@ -26,17 +26,18 @@ import (
 
 // Config holds every user-tunable runtime option that affects the main loop.
 type Config struct {
-	PrefixKey   tcell.Key // multiplexer prefix key (default Ctrl+A)
-	PrefixLabel string    // human-readable prefix name, e.g. "Ctrl+A"
-	Mouse       bool      // enables click-focus, seam-drag resize and wheel scroll
-	StatusFg    tcell.Color
-	StatusBg    tcell.Color
-	LogLevel    slog.Level // minimum log level emitted to the log file
-	LogFormat   string     // "text" (default: "[LEVEL] time file:line : message") or "json"
-	PaneGap     int        // gutter between adjacent panes, in cells (default 1)
-	FalkorHost  string     // FalkorDB host (default localhost)
-	FalkorPort  int        // FalkorDB port (default 6379)
-	FalkorGraph string     // FalkorDB graph name (default tatami)
+	PrefixKey      tcell.Key // multiplexer prefix key (default Ctrl+A)
+	PrefixLabel    string    // human-readable prefix name, e.g. "Ctrl+A"
+	Mouse          bool      // enables click-focus, seam-drag resize and wheel scroll
+	StatusFg       tcell.Color
+	StatusBg       tcell.Color
+	LogLevel       slog.Level // minimum log level emitted to the log file
+	LogFormat      string     // "text" (default: "[LEVEL] time file:line : message") or "json"
+	PaneGap        int        // gutter between adjacent panes, in cells (default 1)
+	FalkorHost     string     // FalkorDB host (default localhost)
+	FalkorPort     int        // FalkorDB port (default 6379)
+	FalkorGraph    string     // FalkorDB graph name (default tatami)
+	FalkorPassword string     // FalkorDB password (default: none)
 }
 
 // defaultConfig returns the built-in settings used when no config file or
@@ -46,8 +47,8 @@ func defaultConfig() *Config {
 		PrefixKey:   tcell.KeyCtrlA,
 		PrefixLabel: "Ctrl+A",
 		Mouse:       false,
-		StatusFg:    tcell.PaletteColor(252) | tcell.ColorValid,
-		StatusBg:    tcell.PaletteColor(235) | tcell.ColorValid,
+		StatusFg:    tcell.NewRGBColor(0xc7, 0xcc, 0xd1),
+		StatusBg:    tcell.NewRGBColor(0x16, 0x1b, 0x22),
 		LogLevel:    slog.LevelInfo,
 		LogFormat:   "text",
 		PaneGap:     1,
@@ -169,6 +170,9 @@ func (c *Config) applyEnv() {
 	if v := os.Getenv("TATAMI_FALKORDB_GRAPH"); v != "" {
 		c.FalkorGraph = v
 	}
+	if v := os.Getenv("TATAMI_FALKORDB_PASSWORD"); v != "" {
+		c.FalkorPassword = v
+	}
 }
 
 // set applies a single parsed key=value pair, logging and skipping anything it
@@ -227,6 +231,8 @@ func (c *Config) set(key, value string) {
 		}
 	case "falkordb_graph":
 		c.FalkorGraph = value
+	case "falkordb_password":
+		c.FalkorPassword = value
 	default:
 		slog.Warn("config: ignoring unknown key", "key", key)
 	}

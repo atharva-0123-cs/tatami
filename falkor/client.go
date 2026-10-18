@@ -44,11 +44,11 @@ var GlobalClient *Client
 // verify reachability.
 func Initialize(cfg *config.Config) {
 	addr := fmt.Sprintf("%s:%d", cfg.FalkorHost, cfg.FalkorPort)
-	slog.Info("initializing falkordb client", "addr", addr, "graph", cfg.FalkorGraph)
+	slog.Info("initializing falkordb client", "addr", addr, "graph", cfg.FalkorGraph, "auth", cfg.FalkorPassword != "")
 
 	rdb := redis.NewClient(&redis.Options{
 		Addr:     addr,
-		Password: "",
+		Password: cfg.FalkorPassword,
 		DB:       0,
 	})
 
@@ -89,12 +89,19 @@ func (c *Client) HealthCheck(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, connectTimeout)
 	defer cancel()
 
+	wasConnected := c.Connected()
 	if err := c.rdb.Ping(ctx).Err(); err != nil {
 		werr := fmt.Errorf("falkordb health check failed at %s: %w", c.addr, err)
 		c.setStatus(false, werr)
+		if wasConnected {
+			slog.Warn("falkordb connection lost", "addr", c.addr, "err", err)
+		}
 		return werr
 	}
 	c.setStatus(true, nil)
+	if !wasConnected {
+		slog.Info("falkordb connected", "addr", c.addr, "graph", c.graphName)
+	}
 	return nil
 }
 
@@ -165,6 +172,53 @@ func (c *Client) Addr() string { return c.addr }
 
 // GraphName returns the configured graph name.
 func (c *Client) GraphName() string { return c.graphName }
+
+// PublishEvent broadcasts a message on a coordination channel. Agents in
+// different panes use this to announce findings or wake each other; the graph
+// remains the durable shared memory, pub/sub is the low-latency nudge.
+func (c *Client) PublishEvent(ctx context.Context, channel, payload string) error {
+	if err := c.Connect(ctx); err != nil {
+		return err
+	}
+	return c.rdb.Publish(ctx, channel, payload).Err()
+}
+
+// SubscribeEvents returns a channel of messages published to channel and a
+// cancel function that stops the subscription. The channel is closed when the
+// context is cancelled or the cancel function is called.
+func (c *Client) SubscribeEvents(ctx context.Context, channel string) (<-chan string, func(), error) {
+	if err := c.Connect(ctx); err != nil {
+		return nil, nil, err
+	}
+	sub := c.rdb.Subscribe(ctx, channel)
+	if _, err := sub.Receive(ctx); err != nil {
+		_ = sub.Close()
+		return nil, nil, err
+	}
+	out := make(chan string, 16)
+	subCtx, cancel := context.WithCancel(ctx)
+	go func() {
+		defer close(out)
+		defer sub.Close()
+		ch := sub.Channel()
+		for {
+			select {
+			case <-subCtx.Done():
+				return
+			case msg, ok := <-ch:
+				if !ok {
+					return
+				}
+				select {
+				case out <- msg.Payload:
+				case <-subCtx.Done():
+					return
+				}
+			}
+		}
+	}()
+	return out, cancel, nil
+}
 
 // Close marks the client disconnected and closes the underlying redis
 // connection.

@@ -121,9 +121,7 @@ func (wm *WindowManager) PaneCount() int {
 }
 
 // PaneIndex returns the 1-based index of the given pane in traversal order.
-//
-// Used by the status bar ("pane: 2/5") and by prefix-number jumps. Returns -1
-// when the pane is not in the tree.
+// Returns -1 when the pane is not in the tree.
 func (wm *WindowManager) PaneIndex(p *pane.Pane) int {
 	idx := 0
 	found := -1
@@ -305,6 +303,22 @@ func (wm *WindowManager) PrevWindow() {
 		return
 	}
 	wm.switchTo((wm.CurrentWin - 1 + len(wm.Windows)) % len(wm.Windows))
+}
+
+// SwitchWindow switches to the window at the given 1-based index (used by the
+// prefix+1..9 jump). It is a no-op when the index is out of range or already
+// active.
+func (wm *WindowManager) SwitchWindow(n int) {
+	idx := n - 1
+	if idx < 0 || idx >= len(wm.Windows) || idx == wm.CurrentWin {
+		return
+	}
+	wm.switchTo(idx)
+}
+
+// HasWindow reports whether n is a valid 1-based window index.
+func (wm *WindowManager) HasWindow(n int) bool {
+	return n >= 1 && n <= len(wm.Windows)
 }
 
 // windowGone removes the (now empty) active window and switches to a

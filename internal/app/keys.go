@@ -32,6 +32,16 @@ import (
 //     simply ends prefix mode without an action.
 //  5. Otherwise the event is forwarded to the shell.
 func (a *App) handleKey(ev *tcell.EventKey) bool {
+	// The command prompt is modal: it consumes every key while open.
+	if a.cmdMode {
+		return a.handleCommandInput(ev)
+	}
+
+	// The pane picker/search overlay is modal.
+	if a.pickKind != pickNone {
+		return a.handlePickerInput(ev)
+	}
+
 	// Graph overlays are modal: they consume every key while open.
 	if a.graphMode == graphInput {
 		return a.handleGraphInput(ev)
@@ -43,11 +53,7 @@ func (a *App) handleKey(ev *tcell.EventKey) bool {
 	// Escape cancels prefix and resize mode.
 	if ev.Key() == tcell.KeyEsc {
 		if a.copyMode {
-			a.copyMode = false
-			a.copyOffset = 0
-			if focused := a.wm.FocusedPane(); focused != nil {
-				focused.Scroll(0)
-			}
+			a.exitCopyMode()
 			return true
 		}
 		if a.resizeMode || a.prefixActive {
@@ -58,37 +64,59 @@ func (a *App) handleKey(ev *tcell.EventKey) bool {
 		return false // forward Esc to the shell
 	}
 
-	// The configured prefix toggles prefix mode.
+	// The configured prefix toggles prefix mode (and leaves copy mode).
 	if ev.Key() == a.prefixKey {
 		if a.resizeMode {
 			a.resizeMode = false
+		}
+		if a.copyMode {
+			a.exitCopyMode()
 		}
 		a.prefixActive = !a.prefixActive
 		return true
 	}
 
-	// Copy mode: j/k scroll, y copies visible text, q exits.
+	// Copy mode: scroll the focused pane's scrollback (j/k, arrows, PgUp/PgDn,
+	// Home/End, g/G), copy with y, and exit with q/Esc or any unhandled key.
 	if a.copyMode {
-		if ev.Key() == tcell.KeyRune {
+		focused := a.wm.FocusedPane()
+		switch {
+		case ev.Key() == tcell.KeyUp:
+			a.scrollCopyBy(-1)
+			return true
+		case ev.Key() == tcell.KeyDown:
+			a.scrollCopyBy(1)
+			return true
+		case ev.Key() == tcell.KeyPgUp:
+			a.scrollCopyBy(-a.copyPage())
+			return true
+		case ev.Key() == tcell.KeyPgDn:
+			a.scrollCopyBy(a.copyPage())
+			return true
+		case ev.Key() == tcell.KeyHome:
+			a.scrollCopyTo(a.maxCopyOffset())
+			return true
+		case ev.Key() == tcell.KeyEnd:
+			a.scrollCopyTo(0)
+			return true
+		case ev.Key() == tcell.KeyRune:
 			switch ev.Rune() {
 			case 'j':
-				if a.copyOffset > 0 {
-					a.copyOffset--
-					if focused := a.wm.FocusedPane(); focused != nil {
-						focused.Scroll(a.copyOffset)
-					}
-				}
+				a.scrollCopyBy(1)
 				return true
 			case 'k':
-				a.copyOffset++
-				if focused := a.wm.FocusedPane(); focused != nil {
-					focused.Scroll(a.copyOffset)
-				}
+				a.scrollCopyBy(-1)
+				return true
+			case 'g':
+				a.scrollCopyTo(a.maxCopyOffset())
+				return true
+			case 'G':
+				a.scrollCopyTo(0)
 				return true
 			case 'y':
 				a.copyMode = false
 				a.copyOffset = 0
-				if focused := a.wm.FocusedPane(); focused != nil {
+				if focused != nil {
 					focused.Scroll(0)
 					msg, err := focused.CopyText()
 					if err != nil {
@@ -99,20 +127,12 @@ func (a *App) handleKey(ev *tcell.EventKey) bool {
 				}
 				return true
 			case 'q':
-				a.copyMode = false
-				a.copyOffset = 0
-				if focused := a.wm.FocusedPane(); focused != nil {
-					focused.Scroll(0)
-				}
+				a.exitCopyMode()
 				return true
 			}
 		}
 		// Any other key exits copy mode.
-		a.copyMode = false
-		a.copyOffset = 0
-		if focused := a.wm.FocusedPane(); focused != nil {
-			focused.Scroll(0)
-		}
+		a.exitCopyMode()
 		return true
 	}
 
@@ -141,14 +161,13 @@ func (a *App) handleKey(ev *tcell.EventKey) bool {
 		if ev.Key() == tcell.KeyRune {
 			ch := ev.Rune()
 
-			// Numbered pane selection: 1-9 jumps to pane N.
+			// Numbered window selection: 1-9 switches to window N.
 			if ch >= '1' && ch <= '9' {
 				idx := int(ch - '0')
-				panes := a.wm.CollectPanes()
-				if idx >= 1 && idx <= len(panes) {
-					a.wm.FocusPane(panes[idx-1])
+				if a.wm.HasWindow(idx) {
+					a.wm.SwitchWindow(idx)
 				} else {
-					a.SetErrorMsg(fmt.Sprintf("Invalid pane: %d (total %d)", idx, len(panes)))
+					a.SetErrorMsg(fmt.Sprintf("Invalid window: %d (total %d)", idx, a.wm.WindowCount()))
 				}
 				return true
 			}
@@ -170,18 +189,6 @@ func (a *App) handleKey(ev *tcell.EventKey) bool {
 				if a.wm.CloseCurrentPane() {
 					a.shouldQuit = true
 				}
-				return true
-			case 'h':
-				a.wm.FocusLeft()
-				return true
-			case 'j':
-				a.wm.FocusDown()
-				return true
-			case 'k':
-				a.wm.FocusUp()
-				return true
-			case 'l':
-				a.wm.FocusRight()
 				return true
 			case 'z':
 				a.wm.Zoom()
@@ -217,24 +224,62 @@ func (a *App) handleKey(ev *tcell.EventKey) bool {
 				}
 				return true
 			case ':':
-				// Open the Cypher query prompt (graph.go).
-				a.openGraphPrompt()
+				// Open the command prompt (command.go). The Cypher query
+				// prompt (graph.go) is reached with the `cypher` command.
+				a.openCommandPrompt()
 				return true
 			case 'g':
 				// Index the working directory into FalkorDB.
 				a.indexProject()
 				return true
+			case 'm':
+				// Open the Cypher prompt directly (graph memory), without
+				// going through command mode's `cypher` command.
+				a.openGraphPrompt()
+				return true
+			case 's':
+				// Save the current workspace as a FalkorDB session.
+				a.openSessionPrompt(graphActSave)
+				return true
+			case 'R':
+				// Restore a workspace from a saved FalkorDB session.
+				a.openSessionPrompt(graphActRestore)
+				return true
+			case 'G':
+				// Show the focused pane's Git status.
+				a.showGitStatus()
+				return true
+			case 'd':
+				// Show the focused pane's uncommitted Git diff.
+				a.showGitDiff()
+				return true
+			case ';':
+				// Open the command prompt (command mode).
+				a.openCommandPrompt()
+				return true
+			case 'P':
+				// Open the pane selection UI.
+				a.openPanePicker()
+				return true
+			case 'f':
+				// Open pane content search.
+				a.openPaneSearch()
+				return true
+			case 'S':
+				// Toggle synchronized input across the window's panes.
+				a.toggleSync()
+				return true
 			case 'w':
-				a.wm.NextWindow()
-				return true
-			case 'W', 'p':
-				a.wm.PrevWindow()
-				return true
-			case 'n':
 				if err := a.wm.NewWindow(); err != nil {
 					slog.Error("failed to create window", "err", err)
 					a.SetErrorMsg(fmt.Sprintf("New window failed: %v", err))
 				}
+				return true
+			case 'n':
+				a.wm.NextWindow()
+				return true
+			case 'p', 'W':
+				a.wm.PrevWindow()
 				return true
 			case '[':
 				a.copyMode = true
@@ -277,7 +322,89 @@ func (a *App) handleKey(ev *tcell.EventKey) bool {
 // into the byte sequence a terminal expects and writes it to the PTY; if no
 // pane is focused the event is dropped.
 func (a *App) forwardKey(ev *tcell.EventKey) {
+	if a.syncOn() {
+		for _, p := range a.wm.CollectPanes() {
+			p.HandleEvent(ev)
+		}
+		return
+	}
 	if focused := a.wm.FocusedPane(); focused != nil {
 		focused.HandleEvent(ev)
+	}
+}
+
+// ------------------------------------------------------- copy/scroll mode ---
+
+// copyPage is the number of lines a PageUp/PageDown moves in copy mode: one
+// screenful minus an overlap row, so context is preserved across pages.
+func (a *App) copyPage() int {
+	n := 1
+	if focused := a.wm.FocusedPane(); focused != nil {
+		if h := focused.Height(); h > 1 {
+			n = h - 1
+		}
+	}
+	return n
+}
+
+// maxCopyOffset is the largest useful scroll offset (the full scrollback).
+func (a *App) maxCopyOffset() int {
+	if focused := a.wm.FocusedPane(); focused != nil {
+		return focused.ScrollbackLen()
+	}
+	return 0
+}
+
+// scrollCopyBy moves the copy-mode view by delta lines: positive scrolls toward
+// the live screen (down/newer), negative toward older scrollback (up). The
+// pane clamps the result, so the cached offset never runs past the scrollback.
+func (a *App) scrollCopyBy(delta int) {
+	focused := a.wm.FocusedPane()
+	if focused == nil {
+		return
+	}
+	focused.Scroll(focused.ScrollOffset() - delta)
+	a.copyOffset = focused.ScrollOffset()
+}
+
+// scrollCopyTo jumps the copy-mode view to an absolute offset (older = larger),
+// clamped by the pane.
+func (a *App) scrollCopyTo(off int) {
+	focused := a.wm.FocusedPane()
+	if focused == nil {
+		return
+	}
+	focused.Scroll(off)
+	a.copyOffset = focused.ScrollOffset()
+}
+
+// exitCopyMode leaves copy mode and snaps the focused pane back to the live
+// screen. It is safe to call when copy mode is not active.
+func (a *App) exitCopyMode() {
+	a.copyMode = false
+	a.copyOffset = 0
+	if focused := a.wm.FocusedPane(); focused != nil {
+		focused.Scroll(0)
+	}
+}
+
+// ScrollWheel scrolls the focused pane by delta lines in response to a mouse
+// wheel event: positive moves toward the live screen (wheel down), negative
+// into scrollback (wheel up). Scrolling into history arms copy mode so the view
+// stays put until the next key; returning to the live screen disarms it. Run on
+// the main goroutine (it mutates UI mode state).
+func (a *App) ScrollWheel(delta int) {
+	focused := a.wm.FocusedPane()
+	if focused == nil {
+		return
+	}
+	if !a.copyMode {
+		a.copyMode = true
+		a.copyOffset = 0
+	}
+	focused.Scroll(focused.ScrollOffset() - delta)
+	a.copyOffset = focused.ScrollOffset()
+	if a.copyOffset == 0 {
+		a.copyMode = false
 	}
 }

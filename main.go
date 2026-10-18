@@ -46,6 +46,22 @@ func main() {
 	cfg := config.Load()
 	setupLogger(f, cfg.LogLevel, cfg.LogFormat)
 
+	// `tatami save [name]` and `tatami restore [name]` operate on FalkorDB
+	// session snapshots without starting the interactive UI.
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "save":
+			runSave(cfg, argOr(os.Args, 2, "default"))
+			return
+		case "restore":
+			runRestore(cfg, argOr(os.Args, 2, "default"))
+			return
+		case "help", "-h", "--help":
+			fmt.Println("usage: tatami [save [name] | restore [name]]")
+			return
+		}
+	}
+
 	falkor.Initialize(cfg)
 
 	// Startup health check: probe FalkorDB once (with a couple of retries) and
@@ -76,5 +92,75 @@ func main() {
 	}
 	defer a.Cleanup()
 
+	a.Run()
+}
+
+// argOr returns args[i] when present and non-empty, else fallback.
+func argOr(args []string, i int, fallback string) string {
+	if i < len(args) && args[i] != "" {
+		return args[i]
+	}
+	return fallback
+}
+
+// initGraph initializes the global FalkorDB client and probes reachability.
+func initGraph(cfg *config.Config) error {
+	falkor.Initialize(cfg)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return falkor.GlobalClient.Startup(ctx)
+}
+
+// runSave snapshots the live workspace (mirrored to disk by the running
+// instance) into a named FalkorDB session.
+func runSave(cfg *config.Config, name string) {
+	if err := initGraph(cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "tatami save: FalkorDB unavailable: %v\n", err)
+		os.Exit(1)
+	}
+	defer falkor.GlobalClient.Close()
+
+	spec, err := app.ReadLiveState()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "tatami save: cannot read live state: %v\n", err)
+		os.Exit(1)
+	}
+	if spec == nil {
+		fmt.Fprintln(os.Stderr, "tatami save: no running tatami session found (live state missing)")
+		os.Exit(1)
+	}
+	spec.Name = name
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := falkor.SaveSession(ctx, falkor.GlobalClient, spec); err != nil {
+		fmt.Fprintf(os.Stderr, "tatami save: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("saved session %q (%d window(s))\n", name, len(spec.Windows))
+}
+
+// runRestore rebuilds and runs the interactive UI from a saved session.
+func runRestore(cfg *config.Config, name string) {
+	if err := initGraph(cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "tatami restore: FalkorDB unavailable: %v\n", err)
+		os.Exit(1)
+	}
+	defer falkor.GlobalClient.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	spec, err := falkor.RestoreSession(ctx, falkor.GlobalClient, name)
+	cancel()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "tatami restore: %v\n", err)
+		os.Exit(1)
+	}
+
+	a, err := app.NewFromSession(cfg, spec)
+	if err != nil {
+		slog.Error(err.Error())
+		fmt.Fprintf(os.Stderr, "tatami: %s\n", err)
+		os.Exit(1)
+	}
+	defer a.Cleanup()
 	a.Run()
 }

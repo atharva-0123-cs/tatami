@@ -6,6 +6,8 @@ package layout
 import (
 	"fmt"
 	"log/slog"
+	"strings"
+	"time"
 
 	"github.com/atharva-0123-cs/tatami/window"
 	"github.com/gdamore/tcell/v2"
@@ -212,14 +214,23 @@ func (wm *WindowManager) seamSpans(avail int, sizes []int) [][2]int {
 	return spans
 }
 
-// statusDark is a dark-theme color scheme for the status bar: near-black
-// background with light text; the bar turns yellow while a prefix/resize mode
-// is active and red to surface an error.
-const (
-	statusBg  = tcell.Color(235) | tcell.ColorValid
-	statusFg  = tcell.Color(252) | tcell.ColorValid
-	statusHi  = tcell.Color(226) | tcell.ColorValid // bright yellow
-	statusErr = tcell.Color(196) | tcell.ColorValid // red
+// statusDark is the modern dark-theme accent palette for the status bar. The
+// base bar background/foreground come from the configurable StatusStyle; these
+// accents are layered on top for the badge, the active window, mode banners,
+// errors and the graph health dot.
+var (
+	statusBadgeBg  = tcell.NewRGBColor(0x2d, 0x6c, 0xdf) // indigo badge
+	statusBadgeFg  = tcell.NewRGBColor(0xff, 0xff, 0xff)
+	statusActiveBg = tcell.NewRGBColor(0x3a, 0x41, 0x4e) // raised block
+	statusActiveFg = tcell.NewRGBColor(0xf0, 0xf3, 0xf6)
+	statusModeBg   = tcell.NewRGBColor(0xf5, 0xc2, 0x42) // amber
+	statusModeFg   = tcell.NewRGBColor(0x16, 0x1b, 0x22)
+	statusErrBg    = tcell.NewRGBColor(0xe0, 0x4f, 0x4f) // red
+	statusErrFg    = tcell.NewRGBColor(0xff, 0xff, 0xff)
+	statusOnFg     = tcell.NewRGBColor(0x3f, 0xb9, 0x50) // green
+	statusOffFg    = tcell.NewRGBColor(0xe0, 0x4f, 0x4f) // red
+	statusFg       = tcell.Color(252) | tcell.ColorValid
+	statusBg       = tcell.Color(235) | tcell.ColorValid
 )
 
 // StatusStyle carries the per-run status-bar appearance. Fg and Bg may be set
@@ -241,96 +252,111 @@ func (s StatusStyle) resolve() StatusStyle {
 	return s
 }
 
-// renderStatus draws the status line at the bottom of the screen.
-//
-// The left half shows the mode banner (" TATAMI | [PREFIX] ...", "[RESIZE] ..."
-// or an error message) in the highlighted color while a mode/error is active;
-// the right half shows the pane count and focused index (plus "[ZOOM]" when
-// zoomed). The whole row is blanked first so stale glyphs never survive from a
-// previous size. Must run on the main goroutine.
+// statusIcon is the workspace glyph shown in the left badge.
+const statusIcon = "⬢"
+
+// statusSeg is one colored block of the status bar.
+type statusSeg struct {
+	text string
+	st   tcell.Style
+}
+
+// renderStatus draws the tmux-style status line: an icon badge followed by the
+// window list as "[index:name]" tabs (the active one highlighted), and a clock
+// on the right. The badge turns amber while a prefix/resize/copy mode is armed
+// and red on error (the message is shown after the window list). The whole row
+// is blanked first so stale glyphs never survive a resize. Must run on the main
+// goroutine.
 func (wm *WindowManager) renderStatus(screen tcell.Screen, maxX, maxY int, prefixActive, resizeMode, copyMode bool, errorMsg string, style StatusStyle) {
 	style = style.resolve()
+	if maxX <= 0 || maxY <= 0 {
+		return
+	}
 	y := maxY - 1
-	left := " TATAMI "
+
+	bar := tcell.StyleDefault.Foreground(style.Fg).Background(style.Bg)
+	modeSt := tcell.StyleDefault.Foreground(statusModeFg).Background(statusModeBg).Bold(true)
+	errSt := tcell.StyleDefault.Foreground(statusErrFg).Background(statusErrBg).Bold(true)
+	activeSt := tcell.StyleDefault.Foreground(statusActiveFg).Background(statusActiveBg).Bold(true)
+	badgeSt := tcell.StyleDefault.Foreground(statusBadgeFg).Background(statusBadgeBg).Bold(true)
+
+	// The badge reflects the active mode: indigo when idle, amber while a
+	// prefix/resize/copy mode is armed, red on error.
+	badge := badgeSt
+	switch {
+	case errorMsg != "":
+		badge = errSt
+	case prefixActive || resizeMode || copyMode:
+		badge = modeSt
+	}
+
+	left := []statusSeg{{" " + statusIcon + " ", badge}}
+	for i, name := range wm.WindowNames() {
+		seg := statusSeg{fmt.Sprintf("[%d:%s]", i+1, name), bar}
+		if i == wm.CurrentWin {
+			seg.st = activeSt
+		}
+		left = append(left, seg)
+	}
 	if errorMsg != "" {
-		left += "| " + errorMsg + " "
-	} else if copyMode {
-		left += "| [COPY] j/k:scroll y:copy q:quit "
-	} else if resizeMode {
-		left += "| [RESIZE] h/j/k/l to resize, Esc to cancel "
-	} else if prefixActive {
-		left += "| [PREFIX] c:h-split C:v-split n:new-win w:next Win W/p:prev-win x:close z:zoom 1-9:jump g:index :cypher q:quit "
-	} else {
-		left += fmt.Sprintf("| Prefix: %s then commands... ", style.PrefixLabel)
+		left = append(left, statusSeg{" " + errorMsg + " ", errSt})
 	}
 
-	// Window list: each window name, the active one wrapped in brackets.
-	winList := ""
-	if wm.WindowCount() > 1 {
-		names := wm.WindowNames()
-		for i, name := range names {
-			if i == wm.CurrentWin {
-				winList += "[" + name + "] "
-			} else {
-				winList += name + " "
-			}
-		}
-	}
-
-	total := wm.PaneCount()
-	right := ""
-	if winList != "" {
-		right = winList
-	}
-	if total > 0 {
-		if right != "" {
-			right += "| "
-		}
-		right += fmt.Sprintf("panes: %d", total)
-		if wm.focused != nil {
-			right += fmt.Sprintf(" | pane: %d/%d", wm.PaneIndex(wm.focused), total)
-		}
-	}
-	if wm.zoomed != nil {
-		right += " [ZOOM]"
-	}
+	// Right group: graph health (when configured) and the clock.
+	var right []statusSeg
 	if wm.statusExtra != "" {
-		if right != "" {
-			right += "| "
+		fg := statusOffFg
+		if strings.HasSuffix(wm.statusExtra, ":on") {
+			fg = statusOnFg
 		}
-		right += wm.statusExtra + " "
-	} else {
-		right += " "
+		right = append(right, statusSeg{
+			" " + wm.statusExtra + " ",
+			tcell.StyleDefault.Foreground(fg).Background(style.Bg).Bold(true),
+		})
 	}
-
-	fg := style.Fg
-	bg := style.Bg
-	if errorMsg != "" {
-		fg = statusErr
-	} else if prefixActive || resizeMode || copyMode {
-		fg = statusHi
-	}
-
-	st := tcell.StyleDefault.Foreground(fg).Background(bg)
-	if errorMsg != "" || prefixActive || resizeMode || copyMode {
-		st = st.Bold(true)
-	}
-
-	runesLeft := []rune(left)
-	runesRight := []rune(right)
+	right = append(right, statusSeg{
+		" " + time.Now().Format("15:04") + " ",
+		tcell.StyleDefault.Foreground(style.Fg).Background(style.Bg).Bold(true),
+	})
 
 	for x := 0; x < maxX; x++ {
-		screen.SetContent(x, y, ' ', nil, st)
+		screen.SetContent(x, y, ' ', nil, bar)
 	}
 
-	for x := 0; x < len(runesLeft) && x < maxX; x++ {
-		screen.SetContent(x, y, runesLeft[x], nil, st)
+	rightW := 0
+	for _, seg := range right {
+		rightW += len([]rune(seg.text))
+	}
+	rightStart := maxX - rightW
+	drawRight := rightStart >= 1
+	if !drawRight {
+		rightStart = maxX
 	}
 
-	rightStart := maxX - len(runesRight)
-	if rightStart > len(runesLeft) {
-		for i, r := range runesRight {
-			screen.SetContent(rightStart+i, y, r, nil, st)
+	x := 0
+	for _, seg := range left {
+		for _, r := range []rune(seg.text) {
+			if x >= rightStart {
+				break
+			}
+			screen.SetContent(x, y, r, nil, seg.st)
+			x++
+		}
+		if x >= rightStart {
+			break
+		}
+	}
+
+	if drawRight {
+		x := rightStart
+		for _, seg := range right {
+			for _, r := range []rune(seg.text) {
+				if x >= maxX {
+					break
+				}
+				screen.SetContent(x, y, r, nil, seg.st)
+				x++
+			}
 		}
 	}
 }

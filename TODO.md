@@ -6,8 +6,8 @@ Tatami is a terminal multiplexer with an integrated FalkorDB graph engine.
 
 ### FalkorDB Core & Client Setup
 - [x] Implement FalkorDB connection manager using Redis/FalkorDB Go client.
-- [x] Add configuration settings in `tatami.conf` for FalkorDB host, port, and credentials (`falkordb_host`, `falkordb_port`).
-- [] Add startup health-check and connection error handling.
+- [x] Add configuration settings in `tatami.conf` for FalkorDB host, port, graph and credentials (`falkordb_host`, `falkordb_port`, `falkordb_graph`, `falkordb_password`).
+- [x] Add startup health-check and connection error handling.
 
 ### Codebase & Dependency Knowledge Graph
 - [x] Implement AST parser / repository scanner for Go, Python, and JS/TS projects.
@@ -17,125 +17,133 @@ Tatami is a terminal multiplexer with an integrated FalkorDB graph engine.
 - [x] Support graph-based dependency & call-chain traversals (`MATCH ... RETURN ...`).
 
 ### Persistent Workspace & Process Graph
-- [ ] Model windows, layout trees (splits), active panes, and working directories as graph nodes in FalkorDB.
-- [ ] Model process execution ancestry (`parent_pid -> child_pid`) in FalkorDB.
-- [ ] Implement session save / snapshot command (`tatami save`).
-- [ ] Implement session restore command (`tatami restore`) to instantly resurrect multi-pane dev environments.
+- [x] Model windows, layout trees (splits), active panes, and working directories as graph nodes in FalkorDB.
+- [x] Model process execution ancestry (`parent_pid -> child_pid`) in FalkorDB.
+- [x] Implement session save / snapshot command (`tatami save`).
+- [x] Implement session restore command (`tatami restore`) to instantly resurrect multi-pane dev environments.
 
 ### Multi-Agent Shared Memory Graph
-- [ ] Build shared memory graph schema in FalkorDB for multi-agent coordination.
-- [ ] Allow AI agents in different panes to read/write findings, bug reports, and task dependencies (`(Agent)-[:FOUND]->(Bug)-[:AFFECTS]->(File)`).
-- [ ] Add agent synchronization primitives via FalkorDB pub/sub or graph polling.
+- [x] Build shared memory graph schema in FalkorDB for multi-agent coordination.
+- [x] Allow AI agents in different panes to read/write findings, bug reports, and task dependencies (`(Agent)-[:FOUND]->(Bug)-[:AFFECTS]->(File)`).
+- [x] Add agent synchronization primitives via FalkorDB pub/sub or graph polling.
 
 ### Semantic Terminal History & Analytics Graph
-- [ ] Store executed shell commands, exit codes, output error summaries, and affected files as a directed graph in FalkorDB.
-- [ ] Query command success patterns and troubleshooting paths using Cypher pattern matching.
+- [x] Store executed shell commands, exit codes, output error summaries, and affected files as a directed graph in FalkorDB.
+- [x] Query command success patterns and troubleshooting paths using Cypher pattern matching.
 
 ## 2. Agentic Coding Harness
 
 ### Built-in Tatami Agent
 
-- [ ] Design the built-in coding-agent harness.
-- [ ] Detect the environment Tatami is running in:
-  - [ ] Operating system
-  - [ ] Shell
-  - [ ] Current working directory
-  - [ ] Git repository
-  - [ ] Git branch
-  - [ ] Git status
-  - [ ] Available compilers/interpreters
-  - [ ] Available package managers
-  - [ ] Available build systems
-- [ ] Build a machine-readable environment description.
-- [ ] Detect project type automatically:
-  - [ ] Go
-  - [ ] C/C++
-  - [ ] Rust
-  - [ ] Python
-  - [ ] JavaScript/TypeScript
-  - [ ] Java
-  - [ ] Other common ecosystems
-- [ ] Detect project metadata:
-  - [ ] Git repository
-  - [ ] README
-  - [ ] AGENTS.md
-  - [ ] CLAUDE.md
-  - [ ] .cursor/
-  - [ ] .github/
-  - [ ] Build configuration
-  - [ ] Test configuration
-- [ ] Provide the agent with relevant project context.
-- [ ] Provide the agent with terminal/pane context.
-- [ ] Allow the agent to execute commands through a controlled interface.
-- [ ] Allow the agent to inspect files.
-- [ ] Allow the agent to modify files.
-- [ ] Capture command output.
-- [ ] Capture command exit codes.
-- [ ] Capture compiler errors.
-- [ ] Capture test failures.
-- [ ] Feed failures back to the agent.
-- [ ] Add command execution timeout handling.
-- [ ] Add process cancellation.
-- [ ] Add working-directory control.
-- [ ] Add environment-variable control.
-- [ ] Add permission/sandbox controls.
-- [ ] Add confirmation mode for destructive commands.
+- [x] Design the built-in coding-agent harness.
+- [x] Detect the environment Tatami is running in:
+  - [x] Operating system
+  - [x] Shell
+  - [x] Current working directory
+  - [x] Git repository
+  - [x] Git branch
+  - [x] Git status
+  - [x] Available compilers/interpreters
+  - [x] Available package managers
+  - [x] Available build systems
+- [x] Build a machine-readable environment description.
+- [x] Detect project type automatically:
+  - [x] Go
+  - [x] C/C++
+  - [x] Rust
+  - [x] Python
+  - [x] JavaScript/TypeScript
+  - [x] Java
+  - [x] Other common ecosystems
+- [x] Detect project metadata:
+  - [x] Git repository
+  - [x] README
+  - [x] AGENTS.md
+  - [x] CLAUDE.md
+  - [x] .cursor/
+  - [x] .github/
+  - [x] Build configuration
+  - [x] Test configuration
+- [x] Provide the agent with relevant project context.
+- [x] Provide the agent with terminal/pane context.
+- [x] Allow the agent to execute commands through a controlled interface.
+- [x] Allow the agent to inspect files.
+- [x] Allow the agent to modify files.
+- [x] Capture command output.
+- [x] Capture command exit codes.
+- [x] Capture compiler errors.
+- [x] Capture test failures.
+- [x] Feed failures back to the agent.
+- [x] Add command execution timeout handling.
+- [x] Add process cancellation.
+- [x] Add working-directory control.
+- [x] Add environment-variable control.
+- [x] Add permission/sandbox controls.
+- [x] Add confirmation mode for destructive commands.
 
 ### Agent Context
 
-- [ ] Define an agent context protocol.
-- [ ] Expose current pane information.
-- [ ] Expose current working directory.
-- [ ] Expose active window/pane layout.
-- [ ] Expose Git state.
-- [ ] Expose recent command history.
-- [ ] Expose relevant terminal output.
-- [ ] Expose current errors.
-- [ ] Expose project instructions.
-- [ ] Prevent unnecessary terminal history from being sent to the model.
-- [ ] Add context-size limits.
-- [ ] Add context filtering/summarization.
+- [x] Define an agent context protocol.
+- [x] Expose current pane information.
+- [x] Expose current working directory.
+- [x] Expose active window/pane layout.
+- [x] Expose Git state.
+- [x] Expose recent command history.
+- [x] Expose relevant terminal output.
+- [x] Expose current errors.
+- [x] Expose project instructions.
+- [x] Prevent unnecessary terminal history from being sent to the model.
+- [x] Add context-size limits.
+- [x] Add context filtering/summarization.
 
 ## 3. Agent ↔ Pane Integration
 
-- [ ] Allow an agent to create a pane.
-- [ ] Allow an agent to create a window.
-- [ ] Allow an agent to select a pane.
-- [ ] Allow an agent to execute commands in a pane.
-- [ ] Allow an agent to read pane output.
-- [ ] Allow an agent to send input to a pane.
-- [ ] Allow an agent to resize panes.
-- [ ] Allow an agent to close panes.
-- [ ] Allow agents to identify panes by stable IDs.
-- [ ] Add pane metadata.
-- [ ] Add window metadata.
-- [ ] Prevent agents from accidentally controlling the wrong pane.
-- [ ] Add explicit agent permissions.
+- [x] Allow an agent to create a pane.
+- [x] Allow an agent to create a window.
+- [x] Allow an agent to select a pane.
+- [x] Allow an agent to execute commands in a pane.
+- [x] Allow an agent to read pane output.
+- [x] Allow an agent to send input to a pane.
+- [x] Allow an agent to resize panes.
+- [x] Allow an agent to close panes.
+- [x] Allow agents to identify panes by stable IDs.
+- [x] Add pane metadata.
+- [x] Add window metadata.
+- [x] Prevent agents from accidentally controlling the wrong pane.
+- [x] Add explicit agent permissions.
 
 ## 4. Agent Events
 
-- [ ] Define internal agent events.
-- [ ] Define pane-created event.
-- [ ] Define pane-closed event.
-- [ ] Define command-started event.
-- [ ] Define command-finished event.
-- [ ] Define command-failed event.
-- [ ] Define terminal-output event.
-- [ ] Define terminal-resize event.
-- [ ] Define Git-state-changed event.
-- [ ] Define build-failed event.
-- [ ] Define test-failed event.
-- [ ] Define test-passed event.
+- [x] Define internal agent events.
+- [x] Define pane-created event.
+- [x] Define pane-closed event.
+- [x] Define command-started event.
+- [x] Define command-finished event.
+- [x] Define command-failed event.
+- [x] Define terminal-output event.
+- [x] Define terminal-resize event.
+- [x] Define Git-state-changed event.
+- [x] Define build-failed event.
+- [x] Define test-failed event.
+- [x] Define test-passed event.
 
 ## 5. Terminal / VT Emulator
+
+> The hand-written emulator was replaced by a thin adapter over
+> `charmbracelet/x/vt` (`term/terminal.go`), which owns ESC/CSI/OSC parsing,
+> the grid, alternate screen, scroll regions and mouse tracking modes. The
+> adapter adds copy-mode scrolling, text extraction and the `term.Cell`/
+> `term.Color` model the UI draws. Items below marked done are now provided by
+> the library; the remaining gaps are in the adapter (e.g. it renders the first
+> rune of a grapheme cluster and ignores OSC 8 link metadata).
 
 - [x] Improve VT parser coverage.
 - [x] Add more CSI sequences.
 - [x] Add more OSC sequences.
 - [x] Verify alternate-screen behavior.
 - [x] Verify scroll regions.
-- [ ] Verify insert/delete character operations.
-- [ ] Verify insert/delete line operations.
+- [x] Verify insert/delete character operations.
+- [x] Verify insert/delete line operations.
 - [x] Improve SGR handling.
 - [x] Improve truecolor handling.
 - [x] Improve 256-color handling.
@@ -176,39 +184,42 @@ Tatami is a terminal multiplexer with an integrated FalkorDB graph engine.
 - [x] Multiple windows.
 - [ ] Window renaming.
 - [x] Window list.
-- [ ] Pane naming.
-- [ ] Pane selection UI.
-- [ ] Pane search.
+- [x] Pane naming.
+- [x] Pane selection UI.
+- [x] Pane search.
 - [x] Pane zoom.
 - [x] Pane swapping.
 - [x] Pane movement.
-- [ ] Pane synchronization.
-- [ ] Session management.
+- [x] Pane synchronization.
+- [x] Copy-mode scrollback (`j`/`k`, arrows, `PgUp`/`PgDn`, `g`/`G`) + clipboard.
+- [x] Mouse wheel scrollback navigation.
+- [x] Session management.
 - [ ] Attach to existing session.
 - [ ] Detach from session.
 - [ ] Reattach after terminal disconnect.
 - [ ] Persistent sessions.
-- [ ] Session restore.
-- [ ] Save layout.
-- [ ] Restore layout.
+- [x] Session restore.
+- [x] Save layout.
+- [x] Restore layout.
 
 ## 8. Command Mode
 
-- [ ] Add command prompt.
-- [ ] Add command parser.
-- [ ] Add command history.
-- [ ] Add command completion.
-- [ ] Add command aliases.
-- [ ] Add command help.
-- [ ] Add command to create panes.
-- [ ] Add command to create windows.
-- [ ] Add command to run agents.
-- [ ] Add command to switch agents.
-- [ ] Add command to inspect agent status.
+- [x] Add command prompt.
+- [x] Add command parser.
+- [x] Add command history.
+- [x] Add command completion.
+- [x] Add command aliases.
+- [x] Add command help.
+- [x] Add command to create panes.
+- [x] Add command to create windows.
+- [x] Add command to run agents.
+- [x] Add command to switch agents.
+- [x] Add command to inspect agent status.
 
 ## 9. Configuration
 
 - [x] Expand tatami.conf.
+- [x] Configure FalkorDB endpoint, graph and credentials (`falkordb_host`/`_port`/`_graph`/`_password`).
 - [x] Configure key bindings.
 - [x] Configure prefix key.
 - [x] Configure colors.
@@ -225,25 +236,25 @@ Tatami is a terminal multiplexer with an integrated FalkorDB graph engine.
 
 ## 10. Git Integration
 
-- [ ] Detect Git repositories.
-- [ ] Show branch in status bar.
-- [ ] Show dirty state.
-- [ ] Show ahead/behind state.
-- [ ] Show current commit.
-- [ ] Detect worktrees.
-- [ ] Agent-aware Git context.
-- [ ] Add Git status command.
-- [ ] Add optional Git diff view.
-- [ ] Add agent Git safety checks.
+- [x] Detect Git repositories.
+- [x] Show branch in status bar.
+- [x] Show dirty state.
+- [x] Show ahead/behind state.
+- [x] Show current commit.
+- [x] Detect worktrees.
+- [x] Agent-aware Git context.
+- [x] Add Git status command.
+- [x] Add optional Git diff view.
+- [x] Add agent Git safety checks.
 
 ## 11. Observability
 
 - [x] Improve structured logging.
-- [ ] Add agent session IDs.
+- [x] Add agent session IDs.
 - [ ] Add pane IDs to logs.
-- [ ] Add command IDs.
-- [ ] Add execution timing.
-- [ ] Add agent token/cost tracking where available.
+- [x] Add command IDs.
+- [x] Add execution timing.
+- [x] Add agent token/cost tracking where available.
 - [x] Add debug mode.
 - [x] Add trace mode.
 - [x] Add crash diagnostics.
@@ -255,8 +266,8 @@ Tatami is a terminal multiplexer with an integrated FalkorDB graph engine.
 - [x] Unit tests for input handling.
 - [ ] PTY integration tests.
 - [ ] End-to-end terminal tests.
-- [ ] Agent harness tests.
-- [ ] External agent tests.
+- [x] Agent harness tests.
+- [x] External agent tests.
 - [ ] Resize tests.
 - [ ] Unicode tests.
 - [ ] Concurrent pane tests.
@@ -293,13 +304,13 @@ Tatami is a terminal multiplexer with an integrated FalkorDB graph engine.
 
 ## 15. Security
 
-- [ ] Define agent permission model.
-- [ ] Separate trusted and untrusted commands.
-- [ ] Protect environment variables.
-- [ ] Prevent accidental destructive commands.
-- [ ] Add command confirmation policy.
-- [ ] Add filesystem access policy.
-- [ ] Add network access policy.
-- [ ] Add agent sandboxing where possible.
-- [ ] Audit shell command execution.
+- [x] Define agent permission model.
+- [x] Separate trusted and untrusted commands.
+- [x] Protect environment variables.
+- [x] Prevent accidental destructive commands.
+- [x] Add command confirmation policy.
+- [x] Add filesystem access policy.
+- [x] Add network access policy.
+- [x] Add agent sandboxing where possible.
+- [x] Audit shell command execution.
 - [ ] Audit external-agent integration.

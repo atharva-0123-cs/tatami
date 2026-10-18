@@ -30,6 +30,15 @@ const (
 	graphResultMode
 )
 
+// graphActionKind selects what Enter does in the graph input prompt.
+type graphActionKind int
+
+const (
+	graphActQuery graphActionKind = iota
+	graphActSave
+	graphActRestore
+)
+
 // graphQueryTimeout bounds a single prompt query; graphIndexTimeout bounds a
 // full project scan and ingest.
 const (
@@ -45,13 +54,62 @@ var (
 	graphPanel = tcell.StyleDefault.Background(tcell.Color(235)).Foreground(tcell.Color(252))
 	graphBar   = tcell.StyleDefault.Background(tcell.Color(24)).Foreground(tcell.Color(231))
 	graphTitle = tcell.StyleDefault.Background(tcell.Color(24)).Foreground(tcell.Color(231)).Bold(true)
+
+	graphBorder    = tcell.StyleDefault.Background(tcell.Color(24)).Foreground(tcell.Color(244))
+	graphPromptSt  = tcell.StyleDefault.Background(tcell.Color(235)).Foreground(tcell.Color(81)).Bold(true)
+	graphInputSt   = tcell.StyleDefault.Background(tcell.Color(235)).Foreground(tcell.Color(231))
+	graphCandidate = tcell.StyleDefault.Background(tcell.Color(235)).Foreground(tcell.Color(245))
+	graphSelected  = tcell.StyleDefault.Background(tcell.Color(24)).Foreground(tcell.Color(231)).Bold(true)
+	graphHintSt    = tcell.StyleDefault.Background(tcell.Color(235)).Foreground(tcell.Color(243))
 )
+
+// cypherKeywords are completed in any token position, alongside node labels and
+// relationship types.
+var cypherKeywords = []string{
+	"MATCH", "OPTIONAL", "RETURN", "WHERE", "CREATE", "MERGE", "DELETE",
+	"DETACH", "SET", "WITH", "ORDER", "BY", "LIMIT", "SKIP", "AS",
+	"COUNT", "DISTINCT", "AND", "OR", "NOT", "IN", "CONTAINS", "STARTS",
+	"ENDS", "ASC", "DESC", "UNION", "UNWIND", "EXISTS",
+}
+
+// completionWords is the pool for non-command tokens: Cypher keywords plus the
+// graph schema's labels and relationship types. completionFirst additionally
+// offers the ":name" builtins while the first token is being typed.
+var (
+	completionWords = buildCompletionWords()
+	completionFirst = buildCompletionFirst()
+)
+
+func buildCompletionWords() []string {
+	out := append([]string{}, cypherKeywords...)
+	out = append(out, falkor.SchemaTokens()...)
+	return out
+}
+
+func buildCompletionFirst() []string {
+	out := append([]string{}, completionWords...)
+	for _, name := range falkor.BuiltinNames() {
+		out = append(out, ":"+name)
+	}
+	return out
+}
 
 // openGraphPrompt arms the Cypher input line with an empty buffer.
 func (a *App) openGraphPrompt() {
 	a.graphMode = graphInput
+	a.graphAction = graphActQuery
 	a.graphBuf = ""
 	a.graphScroll = 0
+	a.resetGraphCompletion()
+}
+
+// openSessionPrompt arms the input line for a session save or restore.
+func (a *App) openSessionPrompt(action graphActionKind) {
+	a.graphMode = graphInput
+	a.graphAction = action
+	a.graphBuf = "default"
+	a.graphScroll = 0
+	a.resetGraphCompletion()
 }
 
 // handleGraphInput processes keys while the Cypher prompt is open. It always
@@ -62,20 +120,107 @@ func (a *App) handleGraphInput(ev *tcell.EventKey) bool {
 		a.graphMode = graphOff
 	case tcell.KeyEnter:
 		q := strings.TrimSpace(a.graphBuf)
+		action := a.graphAction
 		a.graphMode = graphOff
-		if q != "" {
+		switch {
+		case action == graphActSave:
+			a.saveSession(q)
+		case action == graphActRestore:
+			a.restoreSession(q)
+		case q != "":
 			a.runGraphQuery(q)
 		}
+	case tcell.KeyTab:
+		a.completeGraph(1)
+	case tcell.KeyBacktab:
+		a.completeGraph(-1)
 	case tcell.KeyBackspace, tcell.KeyBackspace2:
 		if r := []rune(a.graphBuf); len(r) > 0 {
 			a.graphBuf = string(r[:len(r)-1])
 		}
+		a.resetGraphCompletion()
 	case tcell.KeyCtrlU:
 		a.graphBuf = ""
+		a.resetGraphCompletion()
 	case tcell.KeyRune:
 		a.graphBuf += string(ev.Rune())
+		a.resetGraphCompletion()
 	}
 	return true
+}
+
+// resetGraphCompletion abandons the active completion cycle. It is called after
+// any edit so the next TAB recomputes candidates from the current buffer.
+func (a *App) resetGraphCompletion() {
+	a.graphCompActive = false
+	a.graphCompHead = ""
+	a.graphCompItems = nil
+	a.graphCompIdx = 0
+}
+
+// completeGraph applies the next (dir +1) or previous (dir -1) completion to
+// the token at the cursor. The first press captures the candidate list; later
+// presses cycle it. A no-op when there are no candidates.
+func (a *App) completeGraph(dir int) {
+	if !a.graphCompActive {
+		items := a.currentCompletions()
+		if len(items) == 0 {
+			return
+		}
+		prefix := graphWordPrefix(a.graphBuf)
+		a.graphCompHead = a.graphBuf[:len(a.graphBuf)-len(prefix)]
+		a.graphCompItems = items
+		a.graphCompIdx = 0
+		a.graphCompActive = true
+	} else {
+		n := len(a.graphCompItems)
+		a.graphCompIdx = (a.graphCompIdx + dir%n + n) % n
+	}
+	a.graphBuf = a.graphCompHead + a.graphCompItems[a.graphCompIdx]
+}
+
+// currentCompletions returns the candidates for the token at the end of the
+// buffer. In the first token (no preceding whitespace) the ":name" builtins are
+// offered too; otherwise the pool is Cypher keywords, labels and relationship
+// types. Matching is case-insensitive.
+func (a *App) currentCompletions() []string {
+	prefix := graphWordPrefix(a.graphBuf)
+	if prefix == "" {
+		return nil
+	}
+	head := a.graphBuf[:len(a.graphBuf)-len(prefix)]
+	pool := completionWords
+	if !strings.ContainsAny(head, " \t") {
+		pool = completionFirst
+	}
+	lp := strings.ToLower(prefix)
+	var out []string
+	for _, cand := range pool {
+		if cand != prefix && strings.HasPrefix(strings.ToLower(cand), lp) {
+			out = append(out, cand)
+		}
+	}
+	return out
+}
+
+// graphWordPrefix returns the trailing run of identifier characters (letters,
+// digits, '_', ':' and '-') that completion should replace.
+func graphWordPrefix(buf string) string {
+	i := len(buf)
+	for i > 0 && isGraphWordByte(buf[i-1]) {
+		i--
+	}
+	return buf[i:]
+}
+
+func isGraphWordByte(c byte) bool {
+	switch {
+	case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		return true
+	case c == '_' || c == ':' || c == '-':
+		return true
+	}
+	return false
 }
 
 // runGraphQuery resolves builtin shortcuts and executes the statement.
@@ -115,6 +260,52 @@ func (a *App) indexProject() {
 	}
 	a.SetErrorMsg(fmt.Sprintf("Indexed %d files → %d nodes, %d edges (%d statements)",
 		stats.Files, stats.Nodes, stats.Edges, stats.Statements))
+}
+
+// saveSession snapshots the live workspace and persists it to FalkorDB under
+// the given name (empty means "default").
+func (a *App) saveSession(name string) {
+	if falkor.GlobalClient == nil {
+		a.SetErrorMsg("FalkorDB client is not initialized")
+		return
+	}
+	if name == "" {
+		name = "default"
+	}
+	spec := a.wm.Snapshot(name)
+	a.forceWriteLiveState()
+	ctx, cancel := context.WithTimeout(context.Background(), graphQueryTimeout)
+	defer cancel()
+	if err := falkor.SaveSession(ctx, falkor.GlobalClient, spec); err != nil {
+		a.SetErrorMsg(fmt.Sprintf("Save failed: %v", err))
+		return
+	}
+	a.SetErrorMsg(fmt.Sprintf("Saved session %q: %d window(s), %d pane(s)",
+		name, len(spec.Windows), a.wm.PaneCount()))
+}
+
+// restoreSession loads a named session from FalkorDB and rebuilds the workspace.
+func (a *App) restoreSession(name string) {
+	if falkor.GlobalClient == nil {
+		a.SetErrorMsg("FalkorDB client is not initialized")
+		return
+	}
+	if name == "" {
+		name = "default"
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), graphQueryTimeout)
+	defer cancel()
+	spec, err := falkor.RestoreSession(ctx, falkor.GlobalClient, name)
+	if err != nil {
+		a.SetErrorMsg(fmt.Sprintf("Restore failed: %v", err))
+		return
+	}
+	if err := a.wm.Restore(spec); err != nil {
+		a.SetErrorMsg(fmt.Sprintf("Restore failed: %v", err))
+		return
+	}
+	a.SetErrorMsg(fmt.Sprintf("Restored session %q: %d window(s), %d pane(s)",
+		name, len(spec.Windows), a.wm.PaneCount()))
 }
 
 // startGraphMonitor launches a background goroutine that periodically probes
@@ -167,8 +358,14 @@ func (a *App) graphStatusLabel() string {
 	return "graph:off"
 }
 
-// setGraphResult shows the scrollable result panel.
+// setGraphResult shows the scrollable result panel under the default title.
 func (a *App) setGraphResult(text string) {
+	a.setOverlay("Graph result", text)
+}
+
+// setOverlay shows the scrollable result panel with an explicit title.
+func (a *App) setOverlay(title, text string) {
+	a.overlayTitle = title
 	a.graphResult = text
 	a.graphScroll = 0
 	a.graphMode = graphResultMode
@@ -200,6 +397,14 @@ func (a *App) handleGraphResult(ev *tcell.EventKey) bool {
 // renderGraphOverlay paints the active graph overlay over the panes. It must be
 // called on the main goroutine after the layout is drawn and before Show.
 func (a *App) renderGraphOverlay() {
+	if a.pickKind != pickNone {
+		a.renderPickerOverlay()
+		return
+	}
+	if a.cmdMode {
+		a.renderCommandOverlay()
+		return
+	}
 	switch a.graphMode {
 	case graphInput:
 		a.drawGraphPrompt()
@@ -208,27 +413,128 @@ func (a *App) renderGraphOverlay() {
 	}
 }
 
-// drawGraphPrompt paints the input line and a hint row at the bottom.
+// maxCompletionRows bounds the completion dropdown height.
+const maxCompletionRows = 8
+
+// drawGraphPrompt paints a bordered input panel with an optional completion
+// dropdown as the bottom rows of the screen:
+//
+//	─ Cypher ─────────────────────────────
+//	 Cypher> MATCH (f:File)
+//	   ❯ File
+//	     Function
+//	 Tab complete · Enter run · Esc cancel
 func (a *App) drawGraphPrompt() {
 	w, h := a.screen.Size()
-	if h < 3 || w < 12 {
+	if h < 2 || w < 12 {
 		return
 	}
-	hint := a.graphHint()
-	fillRow(a.screen, w, h-3, graphPanel)
-	drawString(a.screen, 0, h-3, w, hint, graphPanel)
 
-	promptRow := h - 2
-	fillRow(a.screen, w, promptRow, graphBar)
-	text := "Cypher> " + a.graphBuf
-	drawString(a.screen, 0, promptRow, w, text, graphBar)
-	a.screen.ShowCursor(min(len([]rune(text)), w-1), promptRow)
+	items, selected := a.visibleCompletions()
+	listN := len(items)
+	if listN > maxCompletionRows {
+		listN = maxCompletionRows
+	}
+	panelH := 3 + listN
+	if panelH > h {
+		panelH = h
+		listN = h - 3
+		if listN < 0 {
+			listN = 0
+		}
+		panelH = 3 + listN
+		if panelH > h {
+			panelH = h
+		}
+	}
+	top := h - panelH
+
+	for y := top; y < h; y++ {
+		fillRow(a.screen, w, y, graphPanel)
+	}
+
+	// Titled top border.
+	for x := 0; x < w; x++ {
+		a.screen.SetContent(x, top, '─', nil, graphBorder)
+	}
+	drawString(a.screen, 2, top, w-3, " "+a.graphTitleText()+" ", graphTitle)
+
+	// Input line with a colored prompt.
+	inputRow := top + 1
+	label := a.graphPromptLabel()
+	drawString(a.screen, 0, inputRow, w, " "+label, graphPromptSt)
+	bufX := 1 + len([]rune(label))
+	drawString(a.screen, bufX, inputRow, w-bufX, a.graphBuf, graphInputSt)
+	cursorX := bufX + len([]rune(a.graphBuf))
+	if cursorX > w-1 {
+		cursorX = w - 1
+	}
+	a.screen.ShowCursor(cursorX, inputRow)
+
+	// Completion dropdown, scrolled so the selection stays visible.
+	start := 0
+	if selected >= listN && listN > 0 {
+		start = selected - listN + 1
+	}
+	for i := 0; i < listN; i++ {
+		idx := start + i
+		row := top + 2 + i
+		st := graphCandidate
+		text := "     " + items[idx]
+		if idx == selected {
+			st = graphSelected
+			text = "   ❯ " + items[idx]
+		}
+		fillRow(a.screen, w, row, st)
+		drawString(a.screen, 0, row, w, text, st)
+	}
+
+	// Hint row at the very bottom (omitted when the screen is too short).
+	if hintRow := h - 1; hintRow > inputRow {
+		hint := " Tab complete · Enter run · Esc cancel"
+		if len(items) > 0 {
+			if selected >= 0 {
+				hint = fmt.Sprintf(" %d/%d · Tab cycle · Enter run · Esc cancel", selected+1, len(items))
+			} else {
+				hint = fmt.Sprintf(" %d matches · Tab complete · Enter run · Esc cancel", len(items))
+			}
+		}
+		drawString(a.screen, 0, hintRow, w, hint, graphHintSt)
+	}
 }
 
-// graphHint returns the shortcut help line shown above the prompt.
-func (a *App) graphHint() string {
-	return " :" + strings.Join(falkor.BuiltinNames(), "  :") +
-		"   | :deps <path>  :callers <fn>  :chain <fn>  | Esc cancel, Enter run"
+// visibleCompletions returns the dropdown items and the highlighted index (-1
+// when nothing is selected yet). While cycling it shows the captured list so the
+// dropdown stays stable across TAB presses.
+func (a *App) visibleCompletions() ([]string, int) {
+	if a.graphCompActive {
+		return a.graphCompItems, a.graphCompIdx
+	}
+	return a.currentCompletions(), -1
+}
+
+// graphTitleText names the prompt panel for the active input action.
+func (a *App) graphTitleText() string {
+	switch a.graphAction {
+	case graphActSave:
+		return "Save session"
+	case graphActRestore:
+		return "Restore session"
+	default:
+		return "Cypher"
+	}
+}
+
+// graphPromptLabel returns the prompt prefix for the active input action.
+func (a *App) graphPromptLabel() string {
+	switch a.graphAction {
+	case graphActSave:
+		return "Session name to save> "
+	case graphActRestore:
+		return "Session name to restore> "
+	default:
+		return "Cypher> "
+	}
 }
 
 // drawGraphResult paints a scrollable panel with the query output.
@@ -241,7 +547,11 @@ func (a *App) drawGraphResult() {
 	for y := y0; y <= y1; y++ {
 		fillRow(a.screen, w, y, graphPanel)
 	}
-	drawString(a.screen, x0+1, y0, x1-x0-1, " Graph result ", graphTitle)
+	title := a.overlayTitle
+	if title == "" {
+		title = "Graph result"
+	}
+	drawString(a.screen, x0+1, y0, x1-x0-1, " "+title+" ", graphTitle)
 
 	bodyTop, bodyBottom := y0+1, y1-1
 	bodyW := x1 - x0 - 1
